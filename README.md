@@ -83,6 +83,48 @@ export ANDROID_HOME="$HOME/Android/Sdk"
 
 The release build is minified with R8 and the APK is roughly 8 MB.
 
+### Signed release APK (local)
+
+`assembleRelease` produces `app-release-unsigned.apk` until a signing key is configured.
+
+Create a keystore once (keep it and the passwords safe — losing it means you cannot update an
+installed app):
+
+```bash
+keytool -genkeypair -v -keystore openchat.jks \
+  -keyalg RSA -keysize 4096 -validity 10000 -alias openchat
+```
+
+Create `keystore.properties` in the repository root (already gitignored):
+
+```properties
+storeFile=openchat.jks
+storePassword=your-store-password
+keyAlias=openchat
+keyPassword=your-key-password
+```
+
+Or use environment variables instead:
+
+```bash
+export SIGNING_KEYSTORE_PATH=openchat.jks
+export SIGNING_STORE_PASSWORD=your-store-password
+export SIGNING_KEY_ALIAS=openchat
+export SIGNING_KEY_PASSWORD=your-key-password
+```
+
+Then build and verify:
+
+```bash
+./gradlew clean assembleRelease
+# APK: app/build/outputs/apk/release/app-release.apk
+
+"$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs \
+  app/build/outputs/apk/release/app-release.apk
+
+adb install -r app/build/outputs/apk/release/app-release.apk
+```
+
 ## Tests
 
 ```bash
@@ -122,7 +164,14 @@ Runs on every push and pull request:
 
 ### Release (`release.yml`)
 
-Runs on tags like `v1.0.0`:
+Can be started in two ways:
+
+- **Manually:** GitHub → **Actions** → **Release APK** → **Run workflow**, entering a version
+  such as `1.0.0` (run it from `main`).
+- **By tag:** push a tag such as `v1.0.0`; the tag must point at a commit that contains this
+  workflow.
+
+The workflow:
 
 1. Runs the unit tests.
 2. Builds a signed release if these repository secrets exist:
@@ -141,10 +190,26 @@ side by side.
 Create a keystore once:
 
 ```bash
-keytool -genkeypair -v -keystore openchat.jks -keyalg RSA -keysize 4096 \
-  -validity 10000 -alias openchat
-base64 -w0 openchat.jks > keystore.b64
-# paste the contents of keystore.b64 into the ANDROID_KEYSTORE_BASE64 secret
+keytool -genkeypair -v \
+  -keystore openchat-release.jks \
+  -alias openchat \
+  -keyalg RSA -keysize 4096 \
+  -validity 10000
+
+base64 -w0 openchat-release.jks > openchat-release.b64
+# macOS: base64 -i openchat-release.jks -o openchat-release.b64
+# paste the single-line contents of openchat-release.b64 into ANDROID_KEYSTORE_BASE64
+```
+
+Never commit the `.jks` or `.b64` file. Keep a backup of the keystore: Android only accepts
+updates signed with the same key.
+
+To publish by tag:
+
+```bash
+git push origin main
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 ## Architecture
