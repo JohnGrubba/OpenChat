@@ -180,6 +180,18 @@ Performance choices:
 - The SSE reader is incremental and handles split frames and multi-line data.
 - No Hilt/RxJava/WebView; the release APK is R8-minified.
 
+## Dependency updates
+
+Dependabot is configured to keep pull-request noise low:
+
+- routine Gradle **patch/minor** updates arrive as one grouped PR;
+- GitHub Actions updates arrive as one grouped PR;
+- major upgrades of the interdependent build toolchain (Gradle, AGP, Kotlin,
+  Compose compiler/BOM, KSP) are ignored and should be done deliberately.
+
+Merge a Dependabot PR only when its CI run is green. Do not batch major updates:
+upgrade the toolchain locally, run the tests and build, then update the pins together.
+
 ## Known limitations
 
 - OpenCode's free-tier chat models return `403` outside OpenCode; use paid/Go models.
