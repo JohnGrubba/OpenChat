@@ -23,7 +23,11 @@ class AttachmentStore(private val context: Context) {
     private val cameraDir = File(context.cacheDir, "camera").apply { mkdirs() }
     val documents = DocumentExtractor(context)
 
-    fun newCameraFile(): File = File(cameraDir, "photo_${System.currentTimeMillis()}.jpg")
+    fun newCameraFile(): File = File(cameraDir, "photo_${UUID.randomUUID()}.jpg").apply {
+        // Create the file up front so we can reliably tell whether the camera app
+        // actually wrote anything into the EXTRA_OUTPUT Uri.
+        runCatching { createNewFile() }
+    }
 
     suspend fun importImage(uri: Uri): Result<ContentBlock.Image> = withContext(Dispatchers.IO) {
         runCatching {
@@ -62,38 +66,63 @@ class AttachmentStore(private val context: Context) {
                 bitmap = rotated
             }
 
-            val longest = maxOf(bitmap.width, bitmap.height)
-            if (longest > MAX_DIMENSION) {
-                val scale = MAX_DIMENSION.toFloat() / longest
-                val scaled = Bitmap.createScaledBitmap(
-                    bitmap,
-                    (bitmap.width * scale).toInt().coerceAtLeast(1),
-                    (bitmap.height * scale).toInt().coerceAtLeast(1),
-                    true,
-                )
-                if (scaled != bitmap) bitmap.recycle()
-                bitmap = scaled
-            }
-
-            val flattened = if (bitmap.hasAlpha()) {
-                Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888).also { out ->
-                    Canvas(out).apply {
-                        drawColor(Color.WHITE)
-                        drawBitmap(bitmap, 0f, 0f, null)
-                    }
-                }
-            } else {
-                bitmap
-            }
-
             val file = File(attachmentsDir, "img_${UUID.randomUUID()}.jpg")
-            FileOutputStream(file).use { out ->
-                flattened.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
-            }
-            if (flattened != bitmap) flattened.recycle()
+            writeJpeg(bitmap, file)
             bitmap.recycle()
 
             ContentBlock.Image(path = file.absolutePath, mimeType = "image/jpeg", name = name)
+        }
+    }
+
+    /**
+     * Saves a bitmap that is already in memory, such as the thumbnail some camera apps return when
+     * they ignore EXTRA_OUTPUT. Takes ownership of [bitmap] and recycles it.
+     */
+    suspend fun importBitmap(bitmap: Bitmap, name: String = "photo.jpg"): Result<ContentBlock.Image> =
+        withContext(Dispatchers.IO) {
+            try {
+                val file = File(attachmentsDir, "img_${UUID.randomUUID()}.jpg")
+                writeJpeg(bitmap, file)
+                Result.success(
+                    ContentBlock.Image(path = file.absolutePath, mimeType = "image/jpeg", name = name),
+                )
+            } catch (t: Throwable) {
+                Result.failure(t)
+            } finally {
+                bitmap.recycle()
+            }
+        }
+
+    private fun writeJpeg(bitmap: Bitmap, file: File) {
+        val longest = maxOf(bitmap.width, bitmap.height)
+        val scaled = if (longest > MAX_DIMENSION) {
+            val scale = MAX_DIMENSION.toFloat() / longest
+            Bitmap.createScaledBitmap(
+                bitmap,
+                (bitmap.width * scale).toInt().coerceAtLeast(1),
+                (bitmap.height * scale).toInt().coerceAtLeast(1),
+                true,
+            )
+        } else {
+            bitmap
+        }
+        val flattened = if (scaled.hasAlpha()) {
+            Bitmap.createBitmap(scaled.width, scaled.height, Bitmap.Config.ARGB_8888).also { out ->
+                Canvas(out).apply {
+                    drawColor(Color.WHITE)
+                    drawBitmap(scaled, 0f, 0f, null)
+                }
+            }
+        } else {
+            scaled
+        }
+        try {
+            FileOutputStream(file).use { out ->
+                flattened.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
+            }
+        } finally {
+            if (flattened !== scaled) flattened.recycle()
+            if (scaled !== bitmap) scaled.recycle()
         }
     }
 

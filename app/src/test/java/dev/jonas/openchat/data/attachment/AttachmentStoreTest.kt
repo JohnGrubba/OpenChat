@@ -41,4 +41,32 @@ class AttachmentStoreTest {
         assertTrue(options.outHeight <= 1568)
         assertTrue(store.readBase64(image.path)!!.isNotBlank())
     }
+
+    @Test
+    fun `in-memory bitmaps used as camera fallback are stored as jpeg`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = AttachmentStore(context)
+        val bitmap = Bitmap.createBitmap(2400, 1600, Bitmap.Config.ARGB_8888)
+        bitmap.eraseColor(Color.BLUE)
+
+        val image = store.importBitmap(bitmap).getOrThrow()
+
+        assertEquals("image/jpeg", image.mimeType)
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(image.path, options)
+        assertTrue(options.outWidth <= 1568)
+        assertTrue(options.outHeight <= 1568)
+        assertTrue(store.readBase64(image.path)!!.isNotBlank())
+    }
+
+    @Test
+    fun `camera output file exists before the camera app writes it`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val store = AttachmentStore(context)
+
+        val file = store.newCameraFile()
+
+        assertTrue(file.exists())
+        assertEquals(0L, file.length())
+    }
 }

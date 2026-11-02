@@ -1,5 +1,6 @@
 package dev.jonas.openchat.ui.chat
 
+import android.graphics.Bitmap
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -629,6 +630,42 @@ class ChatViewModel(private val container: AppContainer) : ViewModel() {
                 )
             }
         }
+    }
+
+    fun attachBitmap(bitmap: Bitmap, name: String = "photo.jpg") {
+        viewModelScope.launch {
+            _ui.update { it.copy(isAttaching = true) }
+            val result = attachments.importBitmap(bitmap, name)
+            val image = result.getOrNull()
+            if (image != null && _ui.value.pending.size >= MAX_ATTACHMENTS) {
+                attachments.deleteAttachment(image)
+            }
+            _ui.update { state ->
+                when {
+                    image != null && state.pending.size < MAX_ATTACHMENTS ->
+                        state.copy(
+                            pending = state.pending + image,
+                            isAttaching = false,
+                            error = null,
+                        )
+                    image != null ->
+                        state.copy(
+                            isAttaching = false,
+                            error = "You can attach up to $MAX_ATTACHMENTS items.",
+                        )
+                    else ->
+                        state.copy(
+                            isAttaching = false,
+                            error = result.exceptionOrNull()?.message
+                                ?: "Could not add that image.",
+                        )
+                }
+            }
+        }
+    }
+
+    fun reportAttachmentError(message: String) {
+        _ui.update { it.copy(error = message) }
     }
 
     fun attachDocuments(uris: List<Uri>) {

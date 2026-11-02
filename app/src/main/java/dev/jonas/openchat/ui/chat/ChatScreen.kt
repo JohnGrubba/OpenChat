@@ -1,9 +1,14 @@
 package dev.jonas.openchat.ui.chat
 
 import android.Manifest
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
+import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -89,6 +94,7 @@ import dev.jonas.openchat.core.model.MessageStatus
 import dev.jonas.openchat.core.model.Role
 import dev.jonas.openchat.ui.common.FileActions
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -113,7 +119,7 @@ fun ChatScreen(
     var deleteTarget by remember { mutableStateOf<Conversation?>(null) }
     var showClearAll by remember { mutableStateOf(false) }
     var viewImage by remember { mutableStateOf<String?>(null) }
-    var cameraUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var cameraOutput by rememberSaveable { mutableStateOf<String?>(null) }
 
     val photoPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickMultipleVisualMedia(8),
@@ -124,25 +130,50 @@ fun ChatScreen(
     ) { uris -> viewModel.attachDocuments(uris) }
 
     val takePicture = rememberLauncherForActivityResult(
-        ActivityResultContracts.TakePicture(),
-    ) { success ->
-        if (success) cameraUri?.let { viewModel.attachImages(listOf(Uri.parse(it))) }
-    }
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val file = cameraOutput?.let(::File)
+        cameraOutput = null
+        scope.launch {
+            // Most camera apps honour EXTRA_OUTPUT, so prefer the file they wrote. Some devices
+            // ignore EXTRA_OUTPUT and return only a thumbnail in the result data instead.
+            if (file != null) {
+                val hasOutput = withContext(Dispatchers.IO) { file.length() > 0 }
+                if (hasOutput) {
+                    viewModel.attachImages(listOf(Uri.fromFile(file)))
+                    return@launch
+                }
+            }
 
-    val cameraPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted) {
-            val file = viewModel.newCameraFile()
-            val uri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.fileprovider",
-                file,
-            )
-            cameraUri = uri.toString()
-            takePicture.launch(uri)
-        } else {
-            Toast.makeText(context, "Camera permission is needed.", Toast.LENGTH_SHORT).show()
+            val extra = result.data?.extras?.get("data")
+            val thumbnail = extra as? Bitmap
+            val thumbnailUri = extra as? Uri
+            if (thumbnail != null) {
+                withContext(Dispatchers.IO) { file?.delete() }
+                viewModel.attachBitmap(thumbnail)
+                return@launch
+            }
+            if (thumbnailUri != null) {
+                withContext(Dispatchers.IO) { file?.delete() }
+                viewModel.attachImages(listOf(thumbnailUri))
+                return@launch
+            }
+
+            // A few camera apps report success slightly before the file has been flushed.
+            if (file != null && result.resultCode == Activity.RESULT_OK) {
+                val flushed = withContext(Dispatchers.IO) { file.awaitContent() }
+                if (flushed) {
+                    viewModel.attachImages(listOf(Uri.fromFile(file)))
+                    return@launch
+                }
+            }
+
+            withContext(Dispatchers.IO) { file?.delete() }
+            if (result.resultCode == Activity.RESULT_OK) {
+                viewModel.reportAttachmentError(
+                    "The camera app did not save a photo. Try the Photos option instead.",
+                )
+            }
         }
     }
 
@@ -171,6 +202,53 @@ fun ChatScreen(
         }
     }
 
+    fun startCapture() {
+        val file = viewModel.newCameraFile()
+        val uri = try {
+            FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file,
+            )
+        } catch (t: Exception) {
+            file.delete()
+            viewModel.reportAttachmentError("Could not prepare the camera file.")
+            return
+        }
+        cameraOutput = file.absolutePath
+        val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+            putExtra(MediaStore.EXTRA_OUTPUT, uri)
+            // Explicit grants keep camera apps happy on devices where the implicit
+            // EXTRA_OUTPUT grant is not applied.
+            clipData = ClipData.newRawUri("captured_photo", uri)
+            addFlags(
+                Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+        }
+        try {
+            takePicture.launch(intent)
+        } catch (e: ActivityNotFoundException) {
+            cameraOutput = null
+            file.delete()
+            viewModel.reportAttachmentError("No camera app is available on this device.")
+        } catch (e: Exception) {
+            cameraOutput = null
+            file.delete()
+            viewModel.reportAttachmentError("Could not open the camera app.")
+        }
+    }
+
+    val cameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            startCapture()
+        } else {
+            Toast.makeText(context, "Camera permission is needed.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     fun openCamera() {
         showAttachmentSheet = false
         val granted = ContextCompat.checkSelfPermission(
@@ -178,14 +256,7 @@ fun ChatScreen(
             Manifest.permission.CAMERA,
         ) == PackageManager.PERMISSION_GRANTED
         if (granted) {
-            val file = viewModel.newCameraFile()
-            val uri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.fileprovider",
-                file,
-            )
-            cameraUri = uri.toString()
-            takePicture.launch(uri)
+            startCapture()
         } else {
             cameraPermission.launch(Manifest.permission.CAMERA)
         }
@@ -677,4 +748,17 @@ private fun conversationAsMarkdown(state: ChatUiState): String = buildString {
             else -> Unit
         }
     }
+}
+
+/**
+ * Some camera apps deliver RESULT_OK just before the output file is fully flushed. Give them a
+ * short grace period instead of failing the attachment immediately.
+ */
+private suspend fun File.awaitContent(timeoutMs: Long = 1500): Boolean {
+    val deadline = System.currentTimeMillis() + timeoutMs
+    while (System.currentTimeMillis() < deadline) {
+        if (length() > 0) return true
+        delay(50)
+    }
+    return length() > 0
 }
