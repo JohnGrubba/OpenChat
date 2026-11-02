@@ -59,15 +59,25 @@ jobs:
         run: |
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 --decode > release.keystore
+            if [ ! -s release.keystore ]; then
+              echo "ANDROID_KEYSTORE_BASE64 decoded to an empty file." >&2
+              exit 1
+            fi
+            if [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+              echo "ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD are required together." >&2
+              exit 1
+            fi
             {
               echo "SIGNING_KEYSTORE_PATH=release.keystore"
               echo "SIGNING_STORE_PASSWORD=$KEYSTORE_PASSWORD"
               echo "SIGNING_KEY_ALIAS=$KEY_ALIAS"
               echo "SIGNING_KEY_PASSWORD=$KEY_PASSWORD"
             } >> "$GITHUB_ENV"
-            echo "Building a signed release."
+            echo "Building with the configured release keystore."
           else
-            echo "No keystore secret configured; building an unsigned release."
+            echo "No keystore secret configured."
+            echo "The release APK will be signed with the Android debug key so it can be installed."
+            echo "Add the signing secrets for stable, updatable releases."
           fi
 
       - name: Unit tests
@@ -87,6 +97,7 @@ jobs:
             RAW="$REF_NAME"
           fi
           RAW="$(printf '%s' "$RAW" | tr -d '[:space:]')"
+          RAW="${RAW#refs/tags/}"
           VERSION="${RAW#v}"
           if [ -z "$VERSION" ]; then
             echo "A version is required." >&2
@@ -103,6 +114,16 @@ jobs:
 
       - name: Build release
         run: ./gradlew --no-daemon assembleRelease
+
+      - name: Verify APK signature
+        run: |
+          APK="$(find app/build/outputs/apk/release -maxdepth 1 -name '*.apk' | head -n 1)"
+          if [ -z "$APK" ]; then
+            echo "No release APK was produced." >&2
+            exit 1
+          fi
+          echo "Verifying $APK"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK"
 
       - name: Prepare artifact
         env:
@@ -126,6 +147,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: OpenChat v${{ steps.version.outputs.version }}
           generate_release_notes: true
           files: artifacts/*.apk

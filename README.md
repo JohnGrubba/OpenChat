@@ -78,14 +78,15 @@ export ANDROID_HOME="$HOME/Android/Sdk"
 # APK: app/build/outputs/apk/debug/app-debug.apk
 
 ./gradlew assembleRelease
-# APK: app/build/outputs/apk/release/app-release-unsigned.apk
+# APK: app/build/outputs/apk/release/app-release.apk
 ```
 
 The release build is minified with R8 and the APK is roughly 8 MB.
 
 ### Signed release APK (local)
 
-`assembleRelease` produces `app-release-unsigned.apk` until a signing key is configured.
+`assembleRelease` always produces a signed `app-release.apk`. If no release keystore is
+configured, it falls back to the Android debug key so the APK remains installable.
 
 Create a keystore once (keep it and the passwords safe — losing it means you cannot update an
 installed app):
@@ -179,13 +180,14 @@ The workflow:
    - `ANDROID_KEYSTORE_PASSWORD`
    - `ANDROID_KEY_ALIAS`
    - `ANDROID_KEY_PASSWORD`
-3. Without secrets it still builds an unsigned APK.
+3. Without secrets it signs the release with the standard Android **debug key**, so the APK
+   installs, but later builds may require an uninstall if the CI runner generates a different
+   debug key.
 4. Attaches the APK to a GitHub Release and uploads a workflow artifact.
+5. Verifies the APK signature with `apksigner` before uploading anything.
 
-If no signing secrets are configured, the workflow still attaches an **unsigned** APK, which
-Android will not install. In that case use the debug APK from the CI workflow, or add the
-secrets below. Debug and release APKs use different application ids, so both can be installed
-side by side.
+For stable, updatable releases, add the signing secrets below. Debug and release APKs use
+different application ids, so both can be installed side by side.
 
 Create a keystore once:
 
@@ -211,6 +213,24 @@ git push origin main
 git tag v1.0.0
 git push origin v1.0.0
 ```
+
+### Why do I get “App not installed / package appears invalid”?
+
+That happens when Android receives an unsigned APK, a corrupted download, or an APK signed
+with a different key than the installed app.
+
+- Use the APK from the latest **Release APK** workflow run after this fix. It is verified with
+  `apksigner` before upload.
+- If an earlier build of `dev.jonas.openchat` is already installed with a different signature,
+  uninstall it once:
+  ```bash
+  adb uninstall dev.jonas.openchat
+  ```
+  Then install the new APK. You can also uninstall it from Android Settings → Apps.
+- Make sure “Install unknown apps” is allowed for the app you use to open the APK.
+- Do not use a file named `*-unsigned.apk`; the current pipeline no longer publishes one.
+- For stable updates, configure the four signing secrets. Without them the CI debug key may
+  change between runners and Android will reject an in-place update.
 
 ## Architecture
 

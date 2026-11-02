@@ -18,6 +18,7 @@ fun secret(name: String): String? =
 
 val releaseStorePath = secret("SIGNING_KEYSTORE_PATH")
     ?: secret("storeFile")
+val hasReleaseKeystore = releaseStorePath != null && rootProject.file(releaseStorePath).exists()
 
 android {
     namespace = "dev.jonas.openchat"
@@ -39,9 +40,9 @@ android {
     }
 
     signingConfigs {
-        if (releaseStorePath != null) {
+        if (hasReleaseKeystore) {
             create("release") {
-                storeFile = rootProject.file(releaseStorePath)
+                storeFile = rootProject.file(releaseStorePath!!)
                 storePassword = secret("SIGNING_STORE_PASSWORD") ?: secret("storePassword")
                 keyAlias = secret("SIGNING_KEY_ALIAS") ?: secret("keyAlias")
                 keyPassword = secret("SIGNING_KEY_PASSWORD") ?: secret("keyPassword")
@@ -62,7 +63,15 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            signingConfig = signingConfigs.findByName("release")
+            // A release build must be signed. With release secrets we use the real key;
+            // otherwise fall back to the Android debug key so CI produces an installable APK.
+            signingConfig = if (hasReleaseKeystore) {
+                signingConfigs.getByName("release")
+            } else {
+                // Signed with the standard Android debug key: installable, but not ideal for
+                // long-lived updates because CI runners may generate different debug keys.
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
