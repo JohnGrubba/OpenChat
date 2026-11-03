@@ -23,6 +23,7 @@ import dev.jonas.openchat.core.model.ThemeMode
 import dev.jonas.openchat.core.model.ToolCallAccumulator
 import dev.jonas.openchat.core.model.Usage
 import dev.jonas.openchat.core.text.ConversationTrimmer
+import dev.jonas.openchat.core.tool.DsmlToolCalls
 import dev.jonas.openchat.core.tool.LocalTools
 import dev.jonas.openchat.di.AppContainer
 import kotlinx.coroutines.CancellationException
@@ -391,6 +392,7 @@ class ChatViewModel(private val container: AppContainer) : ViewModel() {
                 if (streaming != null &&
                     (streaming.text.isNotBlank() || streaming.reasoning.isNotBlank())
                 ) {
+                    val cancelledText = DsmlToolCalls.extract(streaming.text, emptySet()).text
                     withContext(NonCancellable) {
                         runCatching {
                             repository.saveMessage(
@@ -398,8 +400,8 @@ class ChatViewModel(private val container: AppContainer) : ViewModel() {
                                     id = streaming.messageId,
                                     conversationId = conversation.id,
                                     role = Role.ASSISTANT,
-                                    blocks = if (streaming.text.isBlank()) emptyList() else listOf(
-                                        ContentBlock.Text(streaming.text),
+                                    blocks = if (cancelledText.isBlank()) emptyList() else listOf(
+                                        ContentBlock.Text(cancelledText),
                                     ),
                                     status = MessageStatus.CANCELLED,
                                     createdAt = repository.now(),
@@ -521,13 +523,22 @@ class ChatViewModel(private val container: AppContainer) : ViewModel() {
         if (result.isFailure) {
             error = result.exceptionOrNull()?.message ?: "Generation failed"
         }
-        val calls = toolCalls.build { index -> "call_${messageId}_$index" }
-        if (error == null && text.isBlank() && calls.isEmpty() && reasoning.isBlank()) {
+        // Some OpenAI-compatible hosts leak DeepSeek's DSML tool-call markup into the text
+        // content instead of the structured tool_calls field. Recover it so the call still runs.
+        val inline = DsmlToolCalls.extract(
+            text.toString(),
+            allowedNames = if (toolsEnabled) request.tools.map { it.name }.toSet() else emptySet(),
+        )
+        val calls = toolCalls.build { index -> "call_${messageId}_$index" } +
+            inline.calls.mapIndexed { index, call ->
+                call.copy(id = "call_${messageId}_dsml_$index")
+            }
+        if (error == null && inline.text.isBlank() && calls.isEmpty() && reasoning.isBlank()) {
             error = "The model returned an empty response."
         }
         return RoundResult(
             messageId = messageId,
-            text = text.toString(),
+            text = inline.text,
             reasoning = reasoning.toString(),
             usage = usage,
             toolCalls = calls,
