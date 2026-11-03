@@ -703,6 +703,44 @@ class ChatViewModel(private val container: AppContainer) : ViewModel() {
 
     fun newCameraFile(): File = attachments.newCameraFile()
 
+    fun latestCameraFile(): File? = attachments.latestCameraFile()
+
+    suspend fun awaitCameraCapture(file: File): Boolean = attachments.awaitCameraCapture(file)
+
+    fun attachCapturedImage(file: File) {
+        viewModelScope.launch {
+            _ui.update { it.copy(isAttaching = true) }
+            val result = attachments.importImage(Uri.fromFile(file))
+            val image = result.getOrNull()
+            if (image != null && _ui.value.pending.size >= MAX_ATTACHMENTS) {
+                attachments.deleteAttachment(image)
+            }
+            _ui.update { state ->
+                when {
+                    image != null && state.pending.size < MAX_ATTACHMENTS ->
+                        state.copy(
+                            pending = state.pending + image,
+                            isAttaching = false,
+                            error = null,
+                        )
+                    image != null ->
+                        state.copy(
+                            isAttaching = false,
+                            error = "You can attach up to $MAX_ATTACHMENTS items.",
+                        )
+                    else ->
+                        state.copy(
+                            isAttaching = false,
+                            error = result.exceptionOrNull()?.message
+                                ?: "Could not add that image.",
+                        )
+                }
+            }
+            // importImage copied the pixels into the attachments directory.
+            runCatching { file.delete() }
+        }
+    }
+
     fun selectModel(model: ModelInfo) {
         viewModelScope.launch {
             settingsStore.setModel(model.id, model.name)

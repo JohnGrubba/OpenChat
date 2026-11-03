@@ -1,5 +1,6 @@
 package dev.jonas.openchat.data.attachment
 
+import android.content.ContentResolver
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -12,36 +13,110 @@ import android.util.Base64
 import androidx.exifinterface.media.ExifInterface
 import dev.jonas.openchat.core.model.ContentBlock
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.util.UUID
 
 class AttachmentStore(private val context: Context) {
     private val attachmentsDir = File(context.filesDir, "attachments").apply { mkdirs() }
-    private val cameraDir = File(context.cacheDir, "camera").apply { mkdirs() }
+
+    /**
+     * Camera output lives on external app storage when possible. OEM camera apps are much happier
+     * writing to external cache than to the app's private internal cache, and this directory is
+     * still covered by the FileProvider paths. The internal cache is only a fallback for devices
+     * where external storage is unavailable.
+     */
+    private val cameraDir: File =
+        File(context.getExternalCacheDir() ?: context.cacheDir, "camera").apply { mkdirs() }
+
     val documents = DocumentExtractor(context)
 
-    fun newCameraFile(): File = File(cameraDir, "photo_${UUID.randomUUID()}.jpg").apply {
-        // Create the file up front so we can reliably tell whether the camera app
-        // actually wrote anything into the EXTRA_OUTPUT Uri.
-        runCatching { createNewFile() }
+    /**
+     * Returns a fresh path for the camera app to write into. The file is deliberately *not*
+     * created: several camera apps (Samsung's in particular) refuse to write when the output
+     * file already exists, which resulted in empty captures. FileProvider creates the file on
+     * the camera app's first write.
+     */
+    fun newCameraFile(): File {
+        cameraDir.mkdirs()
+        // A previous capture that was abandoned should never be confused with this one.
+        cameraDir.listFiles()?.forEach { runCatching { it.delete() } }
+        return File(cameraDir, "photo_${UUID.randomUUID()}.jpg")
+    }
+
+    /**
+     * Most recent non-empty capture in the camera directory. Used as a recovery path when the
+     * activity was recreated while the camera app was in the foreground and the in-memory path
+     * was lost.
+     */
+    fun latestCameraFile(): File? = cameraDir.listFiles()
+        ?.filter { it.isFile && it.length() > 0 }
+        ?.maxByOrNull { it.lastModified() }
+
+    /**
+     * Waits until the camera app has finished writing [file]. Some camera apps report success
+     * before the bytes are flushed (or write the JPEG incrementally), so a non-zero length alone
+     * is not enough: wait for the size to settle and for the JPEG header to decode.
+     */
+    suspend fun awaitCameraCapture(file: File, timeoutMs: Long = 6_000): Boolean =
+        withContext(Dispatchers.IO) {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            var lastSize = -1L
+            var stableSince = 0L
+            while (System.currentTimeMillis() < deadline) {
+                val size = if (file.exists()) file.length() else 0L
+                if (size > 0 && size == lastSize) {
+                    if (stableSince == 0L) stableSince = System.currentTimeMillis()
+                    if (System.currentTimeMillis() - stableSince >= 250 && isDecodable(file)) {
+                        return@withContext true
+                    }
+                } else {
+                    lastSize = size
+                    stableSince = 0L
+                }
+                delay(100)
+            }
+            file.exists() && file.length() > 0 && isDecodable(file)
+        }
+
+    private fun isDecodable(file: File): Boolean = runCatching {
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, options)
+        options.outWidth > 0 && options.outHeight > 0
+    }.getOrDefault(false)
+
+    private fun openInput(uri: Uri): InputStream? {
+        if (uri.scheme == ContentResolver.SCHEME_FILE) {
+            val path = uri.path ?: return null
+            return runCatching { FileInputStream(path) }.getOrNull()
+        }
+        return context.contentResolver.openInputStream(uri)
     }
 
     suspend fun importImage(uri: Uri): Result<ContentBlock.Image> = withContext(Dispatchers.IO) {
         runCatching {
             val resolver = context.contentResolver
             var name = "image"
-            resolver.query(uri, null, null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (index >= 0) name = cursor.getString(index) ?: name
+            if (uri.scheme == ContentResolver.SCHEME_FILE) {
+                // Camera captures arrive as file:// URIs. Skip ContentResolver for those: a few
+                // OEM resolver implementations behave inconsistently with file URIs.
+                name = uri.lastPathSegment ?: name
+            } else {
+                resolver.query(uri, null, null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (index >= 0) name = cursor.getString(index) ?: name
+                    }
                 }
             }
 
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+            openInput(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) error("That image could not be read.")
 
             var sample = 1
@@ -50,12 +125,12 @@ class AttachmentStore(private val context: Context) {
                 inSampleSize = sample
                 inPreferredConfig = Bitmap.Config.ARGB_8888
             }
-            var bitmap = resolver.openInputStream(uri)?.use {
+            var bitmap = openInput(uri)?.use {
                 BitmapFactory.decodeStream(it, null, options)
             } ?: error("That image could not be read.")
 
             val rotation = runCatching {
-                resolver.openInputStream(uri)?.use { stream ->
+                openInput(uri)?.use { stream ->
                     ExifInterface(stream).rotationDegrees
                 } ?: 0
             }.getOrDefault(0)

@@ -1,6 +1,5 @@
 package dev.jonas.openchat.ui.chat
 
-import android.Manifest
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.ClipData
@@ -86,7 +85,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import coil.compose.AsyncImage
 import dev.jonas.openchat.core.model.Conversation
@@ -94,7 +92,6 @@ import dev.jonas.openchat.core.model.MessageStatus
 import dev.jonas.openchat.core.model.Role
 import dev.jonas.openchat.ui.common.FileActions
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -132,40 +129,37 @@ fun ChatScreen(
     val takePicture = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
-        val file = cameraOutput?.let(::File)
+        val remembered = cameraOutput?.let(::File)
         cameraOutput = null
         scope.launch {
-            // Most camera apps honour EXTRA_OUTPUT, so prefer the file they wrote. Some devices
-            // ignore EXTRA_OUTPUT and return only a thumbnail in the result data instead.
-            if (file != null) {
-                val hasOutput = withContext(Dispatchers.IO) { file.length() > 0 }
-                if (hasOutput) {
-                    viewModel.attachImages(listOf(Uri.fromFile(file)))
-                    return@launch
-                }
+            // Prefer the file the camera app wrote to EXTRA_OUTPUT. If the activity was
+            // recreated while the camera was in the foreground, recover the newest capture
+            // instead of losing the photo.
+            val file = withContext(Dispatchers.IO) {
+                remembered?.takeIf { it.exists() } ?: viewModel.latestCameraFile()
             }
 
+            // Some camera apps ignore EXTRA_OUTPUT and return only a thumbnail in the result.
             val extra = result.data?.extras?.get("data")
             val thumbnail = extra as? Bitmap
-            val thumbnailUri = extra as? Uri
+            val returned = (extra as? Uri) ?: result.data?.data
+
+            // Wait until the camera app has actually finished writing the JPEG. A few OEMs
+            // report RESULT_OK before flushing, and reading a half-written file fails.
+            if (file != null && viewModel.awaitCameraCapture(file)) {
+                viewModel.attachCapturedImage(file)
+                return@launch
+            }
+
             if (thumbnail != null) {
                 withContext(Dispatchers.IO) { file?.delete() }
                 viewModel.attachBitmap(thumbnail)
                 return@launch
             }
-            if (thumbnailUri != null) {
+            if (returned != null) {
                 withContext(Dispatchers.IO) { file?.delete() }
-                viewModel.attachImages(listOf(thumbnailUri))
+                viewModel.attachImages(listOf(returned))
                 return@launch
-            }
-
-            // A few camera apps report success slightly before the file has been flushed.
-            if (file != null && result.resultCode == Activity.RESULT_OK) {
-                val flushed = withContext(Dispatchers.IO) { file.awaitContent() }
-                if (flushed) {
-                    viewModel.attachImages(listOf(Uri.fromFile(file)))
-                    return@launch
-                }
             }
 
             withContext(Dispatchers.IO) { file?.delete() }
@@ -219,12 +213,27 @@ fun ChatScreen(
         val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
             putExtra(MediaStore.EXTRA_OUTPUT, uri)
             // Explicit grants keep camera apps happy on devices where the implicit
-            // EXTRA_OUTPUT grant is not applied.
+            // EXTRA_OUTPUT grant is not applied. ClipData makes the grant survive
+            // task switches on some OEM builds.
             clipData = ClipData.newRawUri("captured_photo", uri)
             addFlags(
                 Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
                     Intent.FLAG_GRANT_READ_URI_PERMISSION,
             )
+        }
+        // Grant the output URI to every camera app that can handle the intent. Relying on
+        // the implicit grant alone is not reliable across OEMs (notably Samsung).
+        runCatching {
+            context.packageManager
+                .queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+                .forEach { resolved ->
+                    context.grantUriPermission(
+                        resolved.activityInfo.packageName,
+                        uri,
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                }
         }
         try {
             takePicture.launch(intent)
@@ -239,27 +248,12 @@ fun ChatScreen(
         }
     }
 
-    val cameraPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted) {
-            startCapture()
-        } else {
-            Toast.makeText(context, "Camera permission is needed.", Toast.LENGTH_SHORT).show()
-        }
-    }
-
     fun openCamera() {
         showAttachmentSheet = false
-        val granted = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.CAMERA,
-        ) == PackageManager.PERMISSION_GRANTED
-        if (granted) {
-            startCapture()
-        } else {
-            cameraPermission.launch(Manifest.permission.CAMERA)
-        }
+        // ACTION_IMAGE_CAPTURE needs no CAMERA permission from the calling app. Keeping the
+        // permission out of the flow avoids a system dialog and a state where the intent
+        // fails because a declared permission was denied.
+        startCapture()
     }
 
     LaunchedEffect(state.error) {
@@ -748,17 +742,4 @@ private fun conversationAsMarkdown(state: ChatUiState): String = buildString {
             else -> Unit
         }
     }
-}
-
-/**
- * Some camera apps deliver RESULT_OK just before the output file is fully flushed. Give them a
- * short grace period instead of failing the attachment immediately.
- */
-private suspend fun File.awaitContent(timeoutMs: Long = 1500): Boolean {
-    val deadline = System.currentTimeMillis() + timeoutMs
-    while (System.currentTimeMillis() < deadline) {
-        if (length() > 0) return true
-        delay(50)
-    }
-    return length() > 0
 }
