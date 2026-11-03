@@ -6,11 +6,13 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,7 +34,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ContentCopy
@@ -53,11 +57,15 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -79,6 +87,7 @@ import dev.jonas.openchat.core.model.Usage
 import dev.jonas.openchat.core.tool.LocalTools
 import dev.jonas.openchat.ui.common.FileActions
 import dev.jonas.openchat.ui.markdown.MarkdownView
+import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
 
@@ -97,47 +106,162 @@ fun MessageList(
             streaming != null && message.id == streaming.messageId
         }
     }
-    val atBottom by remember { derivedStateOf { !listState.canScrollForward } }
 
-    LaunchedEffect(messages.size, streaming?.text?.length, state.active?.id) {
-        if (atBottom) {
-            val lastIndex = messages.size + (if (streaming != null) 1 else 0) - 1
-            if (lastIndex >= 0) listState.scrollToItem(lastIndex)
+    // Follow mode keeps the newest content pinned above the composer. Content growth must never
+    // switch it off by itself: doing that made the list stop following as soon as the reply grew
+    // taller than the viewport, so new text piled up below the fold. Only an explicit drag away
+    // from the bottom pauses following (and returns it once the reader comes back down).
+    var followBottom by remember { mutableStateOf(true) }
+    val following by rememberUpdatedState(followBottom)
+    val isDragged by listState.interactionSource.collectIsDraggedAsState()
+
+    LaunchedEffect(isDragged) {
+        if (isDragged) {
+            followBottom = false
+        } else if (!listState.canScrollForward) {
+            // A drag that never moved away from the bottom should not park the jump button.
+            followBottom = true
         }
     }
-
-    LazyColumn(
-        state = listState,
-        modifier = modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(22.dp),
-    ) {
-        if (messages.isEmpty() && streaming == null) {
-            item(key = "empty") {
-                val activeModel = state.active?.modelId ?: state.settings.modelId
-                EmptyState(
-                    onSuggestion = onSuggestion,
-                    modelName = state.models.firstOrNull { it.id == activeModel }?.name
-                        ?: state.settings.modelName.ifBlank { activeModel },
-                )
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }
+            .collect { (scrolling, canScrollForward) ->
+                // Settling at the bottom (drag, fling or tap) resumes following.
+                if (!scrolling && !canScrollForward) followBottom = true
             }
-        }
-        items(messages, key = { it.id }) { message ->
-            MessageItem(
-                message = message,
-                models = state.models,
-                onRetry = onRetry,
-                onOpenImage = onOpenImage,
-            )
-        }
-        if (streaming != null) {
-            item(key = "streaming") {
-                StreamingMessage(
-                    streaming = streaming,
-                    toolActivities = state.toolActivities,
+    }
+
+    // Reasoning expansion is stored per message id so it survives scrolling out of view and the
+    // hand-off from the streaming bubble to the saved message (same id, but a different item key).
+    val reasoningChoices = remember { mutableStateMapOf<String, Boolean>() }
+    val streamingNow = streaming != null
+    val answerStarted = streaming?.text?.isNotBlank() == true
+
+    fun reasoningExpanded(id: String): Boolean =
+        reasoningChoices[id] ?: (streamingNow && id == streaming.messageId && !answerStarted)
+
+    fun toggleReasoning(id: String) {
+        val next = !reasoningExpanded(id)
+        reasoningChoices[id] = next
+        // Reading the reasoning should not be interrupted by auto-following the answer.
+        if (next) followBottom = false
+    }
+
+    val scope = rememberCoroutineScope()
+    val activeModelId = state.active?.modelId ?: state.settings.modelId
+    val activeModelName = state.models.firstOrNull { it.id == activeModelId }?.name
+        ?: state.settings.modelName.ifBlank { activeModelId }
+    val scrollTrigger = listOf(
+        state.active?.id,
+        messages.size,
+        streaming?.messageId,
+        streaming?.text?.length,
+        streaming?.reasoning?.length,
+        state.toolActivities.size,
+    )
+
+    LaunchedEffect(scrollTrigger) {
+        if (!following) return@LaunchedEffect
+        // Wait for the frame that lays out the new content before scrolling to its end.
+        withFrameNanos { }
+        listState.snapToBottom()
+    }
+
+    Box(modifier = modifier.fillMaxSize()) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(22.dp),
+        ) {
+            if (messages.isEmpty() && streaming == null) {
+                item(key = "empty") {
+                    EmptyState(
+                        onSuggestion = onSuggestion,
+                        modelName = activeModelName,
+                    )
+                }
+            }
+            items(messages, key = { it.id }) { message ->
+                val expanded = reasoningExpanded(message.id)
+                MessageItem(
+                    message = message,
+                    models = state.models,
+                    reasoningExpanded = expanded,
+                    onToggleReasoning = { toggleReasoning(message.id) },
+                    onRetry = onRetry,
                     onOpenImage = onOpenImage,
                 )
             }
+            // Running tool steps are transient list items so they show up in order, between the
+            // assistant turn that requested them and whatever comes next.
+            items(state.toolActivities, key = { "tool-${it.id}" }) { activity ->
+                ToolActivityRow(activity)
+            }
+            if (streaming != null) {
+                item(key = "streaming") {
+                    StreamingMessage(
+                        streaming = streaming,
+                        modelName = activeModelName,
+                        reasoningExpanded = reasoningExpanded(streaming.messageId),
+                        onToggleReasoning = { toggleReasoning(streaming.messageId) },
+                    )
+                }
+            }
+        }
+        AnimatedVisibility(
+            visible = !followBottom && listState.canScrollForward,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 8.dp),
+            enter = fadeIn(),
+            exit = fadeOut(),
+        ) {
+            ScrollToLatest {
+                followBottom = true
+                scope.launch {
+                    withFrameNanos { }
+                    listState.snapToBottom()
+                }
+            }
+        }
+    }
+}
+
+/** Scrolls so the end of the last item sits on the bottom edge of the viewport. */
+private suspend fun LazyListState.snapToBottom() {
+    val layout = layoutInfo
+    if (layout.totalItemsCount == 0) return
+    val lastIndex = layout.totalItemsCount - 1
+    val lastVisible = layout.visibleItemsInfo.lastOrNull()
+    if (lastVisible == null || lastVisible.index < lastIndex) {
+        scrollToItem(lastIndex)
+    }
+    val info = layoutInfo
+    val tail = info.visibleItemsInfo.lastOrNull() ?: return
+    val contentBottom = info.viewportEndOffset - info.afterContentPadding
+    val overflow = tail.offset + tail.size - contentBottom
+    if (overflow > 0) scrollBy(overflow.toFloat())
+}
+
+@Composable
+private fun ScrollToLatest(onClick: () -> Unit) {
+    Surface(
+        shape = CircleShape,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outlineVariant,
+        ),
+        shadowElevation = 4.dp,
+    ) {
+        IconButton(onClick = onClick, modifier = Modifier.size(40.dp)) {
+            Icon(
+                Icons.Outlined.ArrowDownward,
+                contentDescription = "Scroll to latest",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
         }
     }
 }
@@ -222,12 +346,21 @@ private fun EmptyState(onSuggestion: (String) -> Unit, modelName: String) {
 private fun MessageItem(
     message: ChatMessage,
     models: List<dev.jonas.openchat.core.model.ModelInfo>,
+    reasoningExpanded: Boolean,
+    onToggleReasoning: () -> Unit,
     onRetry: () -> Unit,
     onOpenImage: (String) -> Unit,
 ) {
     when (message.role) {
         Role.USER -> UserMessage(message, onOpenImage)
-        Role.ASSISTANT -> AssistantMessage(message, models, onRetry, onOpenImage)
+        Role.ASSISTANT -> AssistantMessage(
+            message = message,
+            models = models,
+            reasoningExpanded = reasoningExpanded,
+            onToggleReasoning = onToggleReasoning,
+            onRetry = onRetry,
+            onOpenImage = onOpenImage,
+        )
         Role.TOOL -> ToolResultCard(message)
         Role.SYSTEM -> Unit
     }
@@ -323,6 +456,8 @@ private fun UserMessage(message: ChatMessage, onOpenImage: (String) -> Unit) {
 private fun AssistantMessage(
     message: ChatMessage,
     models: List<dev.jonas.openchat.core.model.ModelInfo>,
+    reasoningExpanded: Boolean,
+    onToggleReasoning: () -> Unit,
     onRetry: () -> Unit,
     onOpenImage: (String) -> Unit,
 ) {
@@ -331,7 +466,12 @@ private fun AssistantMessage(
         AssistantHeader(modelName = modelLabel(message.modelId, models))
         val reasoning = message.reasoning
         if (reasoning.isNotBlank()) {
-            ReasoningSection(reasoning)
+            ReasoningSection(
+                reasoning = reasoning,
+                expanded = reasoningExpanded,
+                streaming = false,
+                onToggle = onToggleReasoning,
+            )
         }
         if (message.text.isNotBlank()) {
             SelectionContainer {
@@ -463,8 +603,13 @@ private fun AssistantHeader(modelName: String) {
 }
 
 @Composable
-private fun ReasoningSection(reasoning: String) {
-    var expanded by remember { mutableStateOf(false) }
+private fun ReasoningSection(
+    reasoning: String,
+    expanded: Boolean,
+    streaming: Boolean,
+    onToggle: () -> Unit,
+) {
+    val scrollState = rememberScrollState()
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -473,8 +618,8 @@ private fun ReasoningSection(reasoning: String) {
         Row(
             modifier = Modifier
                 .clip(RoundedCornerShape(8.dp))
-                .clickable { expanded = !expanded }
-                .padding(vertical = 2.dp),
+                .clickable(onClick = onToggle)
+                .padding(horizontal = 2.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(
@@ -485,16 +630,14 @@ private fun ReasoningSection(reasoning: String) {
             )
             Spacer(modifier = Modifier.width(4.dp))
             Text(
-                text = "Reasoning",
+                text = if (streaming && !expanded) "Thinking…" else "Reasoning",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        AnimatedVisibility(
-            visible = expanded,
-            enter = expandVertically(),
-            exit = shrinkVertically(),
-        ) {
+        // No height animation here: animating item heights inside a streaming lazy list makes the
+        // list jump around while the reader opens and closes the panel.
+        if (expanded) {
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -503,12 +646,26 @@ private fun ReasoningSection(reasoning: String) {
                 color = MaterialTheme.colorScheme.surfaceVariant,
             ) {
                 SelectionContainer {
-                    MarkdownView(
-                        text = reasoning,
-                        modifier = Modifier.padding(12.dp),
-                    )
+                    Column(
+                        modifier = Modifier
+                            .heightIn(max = 260.dp)
+                            .verticalScroll(scrollState)
+                            .padding(12.dp),
+                    ) {
+                        MarkdownView(
+                            text = reasoning,
+                            modifier = Modifier.fillMaxWidth(),
+                            streaming = streaming,
+                        )
+                    }
                 }
             }
+        }
+    }
+    if (streaming && expanded) {
+        LaunchedEffect(reasoning.length) {
+            withFrameNanos { }
+            scrollState.scrollTo(scrollState.maxValue)
         }
     }
 }
@@ -631,13 +788,19 @@ private fun ToolResultCard(message: ChatMessage) {
 @Composable
 private fun StreamingMessage(
     streaming: StreamingState,
-    toolActivities: List<ToolActivity>,
-    onOpenImage: (String) -> Unit,
+    modelName: String,
+    reasoningExpanded: Boolean,
+    onToggleReasoning: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
-        AssistantHeader(modelName = "")
+        AssistantHeader(modelName = modelName)
         if (streaming.reasoning.isNotBlank()) {
-            ReasoningSection(streaming.reasoning)
+            ReasoningSection(
+                reasoning = streaming.reasoning,
+                expanded = reasoningExpanded,
+                streaming = true,
+                onToggle = onToggleReasoning,
+            )
         }
         if (streaming.text.isNotBlank()) {
             SelectionContainer {
@@ -649,7 +812,7 @@ private fun StreamingMessage(
             }
             Spacer(modifier = Modifier.height(4.dp))
             StreamingCursor()
-        } else if (streaming.reasoning.isBlank() && toolActivities.isEmpty()) {
+        } else if (streaming.reasoning.isBlank()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(14.dp),
@@ -662,12 +825,6 @@ private fun StreamingMessage(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-            }
-        }
-        if (toolActivities.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                toolActivities.forEach { activity -> ToolActivityRow(activity) }
             }
         }
     }

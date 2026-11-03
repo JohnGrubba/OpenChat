@@ -330,25 +330,12 @@ class ChatViewModel(private val container: AppContainer) : ViewModel() {
                         )
                         repository.saveMessage(toolMessage)
                         history = history + toolMessage
+                        // The saved tool message renders as a result card in its timeline position,
+                        // so drop the transient "running" step instead of leaving a duplicate.
                         _ui.update { state ->
                             state.copy(
-                                toolActivities = state.toolActivities.map { activity ->
-                                    if (activity.id == activityId) {
-                                        activity.copy(
-                                            status = if (result.isError) {
-                                                ToolActivityStatus.ERROR
-                                            } else {
-                                                ToolActivityStatus.DONE
-                                            },
-                                            detail = if (result.isError) {
-                                                "Tool failed: ${result.content.take(120)}"
-                                            } else {
-                                                call.doneLabel()
-                                            },
-                                        )
-                                    } else {
-                                        activity
-                                    }
+                                toolActivities = state.toolActivities.filterNot {
+                                    it.id == activityId
                                 },
                             )
                         }
@@ -919,12 +906,6 @@ class ChatViewModel(private val container: AppContainer) : ViewModel() {
         LocalTools.WEB_SEARCH -> "Searching the web"
         LocalTools.WEB_FETCH -> "Reading a page"
         else -> "Running $name"
-    }
-
-    private fun ContentBlock.ToolCall.doneLabel(): String = when (name) {
-        LocalTools.WEB_SEARCH -> "Searched the web"
-        LocalTools.WEB_FETCH -> "Read a page"
-        else -> "Finished $name"
     }
 
     private data class RoundResult(
