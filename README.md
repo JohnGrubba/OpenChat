@@ -18,7 +18,7 @@ OpenChat is a native Kotlin + Jetpack Compose app (no WebView, no JavaScript bri
 - **Images** from camera or photo picker, downscaled on-device before upload.
 - **Documents**: PDF, DOCX, PPTX, XLSX, HTML, Markdown, JSON, CSV, source code and plain text, extracted locally.
 - **Local web tools**: `web_search` and `web_fetch` executed on the phone, with DuckDuckGo out of the box and optional Brave Search.
-- **Markdown rendering** with tables, lists, quotes, links, syntax highlighting, native LaTeX math (display and inline), and copy/save/share for code blocks.
+- **Markdown rendering** with tables, lists, quotes, links, syntax highlighting, LaTeX math (display and inline), and copy/save/share for code blocks.
 - **Usage awareness**: token counts, cached tokens, cost, and OpenCode `allowance` are shown per reply.
 - **Conversation management**: search, pin, rename, delete, export to Markdown/JSON.
 - **Privacy first**: no analytics, no server, no backup of chats or keys; secrets are AES-GCM encrypted via the Android Keystore.

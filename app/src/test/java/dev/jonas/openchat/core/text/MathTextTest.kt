@@ -27,4 +27,20 @@ class MathTextTest {
         assertTrue(MathText.toUnicode("a \\times b \\div c").contains("÷"))
         assertEquals("sin x", MathText.toUnicode("\\sin x"))
     }
+
+    @Test
+    fun `deeply nested input is rejected without overflowing`() {
+        val nested = "{".repeat(500) + "x" + "}".repeat(500)
+        assertTrue(MathText.toUnicode(nested).isNotEmpty())
+    }
+
+    @Test
+    fun `display math keeps aligned environments on separate lines`() {
+        val display = MathText.toDisplay(
+            "\\begin{aligned} A &= \\pi r^2 \\\\ V &= \\frac{4}{3}\\pi r^3 \\end{aligned}",
+        )
+        assertEquals(2, display.lines().size)
+        assertTrue(display.contains("A = π r²"))
+        assertTrue(display.contains("V = 4/3π r³"))
+    }
 }

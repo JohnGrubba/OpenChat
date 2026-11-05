@@ -30,4 +30,26 @@ class MarkdownRenderTest {
         compose.onNodeWithText("This is bold.", substring = true).assertExists()
         compose.onNodeWithText("first item").assertExists()
     }
+
+    @Test
+    fun rendersMathAndTablesWithoutCrashing() {
+        compose.setContent {
+            OpenChatTheme(ThemeMode.LIGHT) {
+                MarkdownView(
+                    text = """
+                        The formula is:
+
+                        ${'$'}${'$'}x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}${'$'}${'$'}
+
+                        | Name | Value |
+                        |---|---|
+                        | Alpha | 1 |
+                        | Beta | 2 |
+                    """.trimIndent(),
+                )
+            }
+        }
+        compose.onNodeWithText("Alpha").assertExists()
+        compose.onNodeWithText("Beta").assertExists()
+    }
 }

@@ -3,59 +3,88 @@ package dev.jonas.openchat.core.text
 /**
  * A small LaTeX → Unicode converter used for inline formulas.
  *
- * Inline math cannot easily be replaced by a bitmap without breaking text flow, so simple
- * formulas are rendered with real Unicode glyphs (fractions, roots, scripts, Greek letters and
- * the common relational/operator symbols). Display formulas use the native LaTeX renderer.
+ * Inline math cannot easily be replaced by a bitmap without breaking text flow, so formulas
+ * are rendered with real Unicode glyphs (fractions, roots, scripts, Greek letters and the common
+ * relational/operator symbols). Pathologically nested input is rejected instead of recursing far
+ * enough to overflow the stack.
  */
 object MathText {
+    private const val MAX_DEPTH = 64
 
-    fun toUnicode(tex: String): String =
-        Converter(tex).convert().replace(Regex(" {2,}"), " ").trim()
+    /** Converts inline math to a single Unicode run so it can flow inside a paragraph. */
+    fun toUnicode(tex: String): String = try {
+        Converter(tex, display = false).convert().replace(Regex(" {2,}"), " ").trim()
+    } catch (_: TooDeep) {
+        tex.trim()
+    }
 
-    private class Converter(private val source: String) {
+    /**
+     * Converts display math to Unicode and keeps line breaks, so environments such as
+     * `aligned`, `cases` and `matrix` stay readable as multiple centered lines.
+     */
+    fun toDisplay(tex: String): String = try {
+        val lines = Converter(tex, display = true).convert()
+            .lines()
+            .map { it.replace(Regex(" {2,}"), " ").trim() }
+            .filter { it.isNotEmpty() }
+        if (lines.isEmpty()) toUnicode(tex) else lines.joinToString("\n")
+    } catch (_: TooDeep) {
+        tex.trim()
+    }
+
+    private class TooDeep : RuntimeException()
+
+    private class Converter(private val source: String, private val display: Boolean) {
         private var i = 0
+        private var depth = 0
 
         fun convert(): String = convertUntil(null)
 
         private fun convertUntil(terminator: Char?): String {
-            val out = StringBuilder()
-            while (i < source.length) {
-                val ch = source[i]
-                if (terminator != null && ch == terminator) {
-                    i++
-                    break
+            if (depth >= MAX_DEPTH) throw TooDeep()
+            depth++
+            try {
+                val out = StringBuilder()
+                while (i < source.length) {
+                    val ch = source[i]
+                    if (terminator != null && ch == terminator) {
+                        i++
+                        break
+                    }
+                    when (ch) {
+                        '{' -> {
+                            i++
+                            out.append(convertUntil('}'))
+                        }
+                        '}' -> i++
+                        '^' -> {
+                            i++
+                            out.append(superscript(readArgument()))
+                        }
+                        '_' -> {
+                            i++
+                            out.append(subscript(readArgument()))
+                        }
+                        '\\' -> out.append(readCommand())
+                        '$' -> i++
+                        '&' -> {
+                            out.append(' ')
+                            i++
+                        }
+                        '\n', '\r', '\t' -> {
+                            out.append(' ')
+                            i++
+                        }
+                        else -> {
+                            out.append(ch)
+                            i++
+                        }
+                    }
                 }
-                when (ch) {
-                    '{' -> {
-                        i++
-                        out.append(convertUntil('}'))
-                    }
-                    '}' -> i++
-                    '^' -> {
-                        i++
-                        out.append(superscript(readArgument()))
-                    }
-                    '_' -> {
-                        i++
-                        out.append(subscript(readArgument()))
-                    }
-                    '\\' -> out.append(readCommand())
-                    '$' -> i++
-                    '&' -> {
-                        out.append(' ')
-                        i++
-                    }
-                    '\n', '\r', '\t' -> {
-                        out.append(' ')
-                        i++
-                    }
-                    else -> {
-                        out.append(ch)
-                        i++
-                    }
-                }
+                return out.toString()
+            } finally {
+                depth--
             }
-            return out.toString()
         }
 
         private fun readArgument(): String {
@@ -132,7 +161,7 @@ object MathText {
             if (!first.isLetter()) {
                 i++
                 return when (first) {
-                    '\\' -> " "
+                    '\\' -> if (display) "\n" else " "
                     '{' -> "{"
                     '}' -> "}"
                     '%' -> "%"

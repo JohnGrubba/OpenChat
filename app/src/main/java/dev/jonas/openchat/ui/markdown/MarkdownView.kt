@@ -69,18 +69,28 @@ fun MarkdownView(
 ) {
     val latestText by rememberUpdatedState(text)
     var blocks by remember {
-        mutableStateOf(if (streaming) emptyList() else MarkdownParser.parse(text))
+        mutableStateOf(
+            if (streaming) {
+                emptyList()
+            } else {
+                runCatching { MarkdownParser.parse(text) }.getOrElse { emptyList() }
+            },
+        )
     }
     LaunchedEffect(text, streaming) {
         if (!streaming) {
-            blocks = withContext(Dispatchers.Default) { MarkdownParser.parse(text) }
+            blocks = withContext(Dispatchers.Default) {
+                runCatching { MarkdownParser.parse(text) }.getOrElse { emptyList() }
+            }
         }
     }
     LaunchedEffect(streaming) {
         if (streaming) {
             while (true) {
                 delay(120)
-                blocks = withContext(Dispatchers.Default) { MarkdownParser.parse(latestText) }
+                blocks = withContext(Dispatchers.Default) {
+                    runCatching { MarkdownParser.parse(latestText) }.getOrElse { emptyList() }
+                }
             }
         }
     }
@@ -242,7 +252,10 @@ private fun buildInline(
                     letterSpacing = 0.2.sp,
                 ),
             ) {
-                append(MathText.toUnicode(inline.tex))
+                append(
+                    runCatching { MathText.toUnicode(inline.tex) }
+                        .getOrElse { inline.tex },
+                )
             }
         }
     }
