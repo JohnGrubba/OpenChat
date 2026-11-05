@@ -13,7 +13,7 @@ object MathText {
 
     /** Converts inline math to a single Unicode run so it can flow inside a paragraph. */
     fun toUnicode(tex: String): String = try {
-        Converter(tex, display = false).convert().replace(Regex(" {2,}"), " ").trim()
+        beautify(Converter(tex, display = false).convert())
     } catch (_: TooDeep) {
         tex.trim()
     }
@@ -25,7 +25,7 @@ object MathText {
     fun toDisplay(tex: String): String = try {
         val lines = Converter(tex, display = true).convert()
             .lines()
-            .map { it.replace(Regex(" {2,}"), " ").trim() }
+            .map(::beautify)
             .filter { it.isNotEmpty() }
         if (lines.isEmpty()) toUnicode(tex) else lines.joinToString("\n")
     } catch (_: TooDeep) {
@@ -331,6 +331,13 @@ object MathText {
 
     private fun fallbackScript(value: String, marker: Char): String =
         if (value.length == 1) "$marker$value" else "$marker($value)"
+
+    /** Adds TeX-like spacing around relations, sums and products so formulas are easier to read. */
+    private fun beautify(value: String): String = value
+        .replace(Regex("(?<=\\S)\\s*([=<>≤≥≠≈≡])\\s*(?=\\S)"), " $1 ")
+        .replace(Regex("(?<=\\S)\\s*([+×÷±∓])\\s*(?=\\S)"), " $1 ")
+        .replace(Regex(" {2,}"), " ")
+        .trim()
 
     private val superscripts: Map<Char, String> = mapOf(
         '0' to "⁰", '1' to "¹", '2' to "²", '3' to "³", '4' to "⁴",

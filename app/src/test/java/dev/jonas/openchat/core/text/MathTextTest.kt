@@ -9,7 +9,7 @@ class MathTextTest {
     fun `fractions and roots become readable unicode`() {
         assertEquals("a/b", MathText.toUnicode("\\frac{a}{b}"))
         assertEquals("√x", MathText.toUnicode("\\sqrt{x}"))
-        assertEquals("√(x+1)", MathText.toUnicode("\\sqrt{x+1}"))
+        assertEquals("√(x + 1)", MathText.toUnicode("\\sqrt{x+1}"))
         assertEquals("³√x", MathText.toUnicode("\\sqrt[3]{x}"))
     }
 

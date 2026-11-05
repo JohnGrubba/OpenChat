@@ -52,4 +52,35 @@ class MarkdownRenderTest {
         compose.onNodeWithText("Alpha").assertExists()
         compose.onNodeWithText("Beta").assertExists()
     }
+
+    @Test
+    fun rendersLatexReasoningLikeTheChatTranscript() {
+        compose.setContent {
+            OpenChatTheme(ThemeMode.DARK) {
+                MarkdownView(
+                    text = """
+                        Let's solve
+
+                        \[
+                        a+b+c=abc
+                        \]
+
+                        for positive integers \(a,b,c\).
+
+                        ### Step 1: Use symmetry
+                        The equation is symmetric in \(a,b,c\), so assume without loss of generality that
+
+                        \[
+                        a\le b\le c.
+                        \]
+                    """.trimIndent(),
+                )
+            }
+        }
+        compose.onNodeWithText("Step 1: Use symmetry").assertExists()
+        compose.onNodeWithText("a + b + c = abc", substring = true).assertExists()
+        compose.onNodeWithText("a ≤ b ≤ c", substring = true).assertExists()
+        compose.onNodeWithText("###", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("\\[", substring = true).assertDoesNotExist()
+    }
 }

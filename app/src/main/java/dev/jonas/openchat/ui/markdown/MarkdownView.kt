@@ -73,14 +73,14 @@ fun MarkdownView(
             if (streaming) {
                 emptyList()
             } else {
-                runCatching { MarkdownParser.parse(text) }.getOrElse { emptyList() }
+                MarkdownParser.parseRecovering(text)
             },
         )
     }
     LaunchedEffect(text, streaming) {
         if (!streaming) {
             blocks = withContext(Dispatchers.Default) {
-                runCatching { MarkdownParser.parse(text) }.getOrElse { emptyList() }
+                MarkdownParser.parseRecovering(text)
             }
         }
     }
@@ -89,7 +89,7 @@ fun MarkdownView(
             while (true) {
                 delay(120)
                 blocks = withContext(Dispatchers.Default) {
-                    runCatching { MarkdownParser.parse(latestText) }.getOrElse { emptyList() }
+                    MarkdownParser.parseRecovering(latestText)
                 }
             }
         }

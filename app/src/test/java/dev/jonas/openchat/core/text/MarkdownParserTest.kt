@@ -120,6 +120,15 @@ class MarkdownParserTest {
     }
 
     @Test
+    fun `invisible characters and leading padding do not break blocks`() {
+        val blocks = MarkdownParser.parse(
+            "\u200B  ### Step 1\u200B\n\n  \\[\na+b=1\n  \\]",
+        )
+        assertTrue(blocks.any { it is MdBlock.Heading })
+        assertTrue(blocks.any { it is MdBlock.Math })
+    }
+
+    @Test
     fun `table pipes inside inline math do not split cells`() {
         val table = MarkdownParser.parse(
             "| value | note |\n|---|---|\n| \$|x|\$ | abs |",

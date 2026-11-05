@@ -23,6 +23,7 @@ sealed interface MdBlock {
 }
 
 sealed interface MdInline {
+
     data class Text(val text: String) : MdInline
     data class Bold(val children: List<MdInline>) : MdInline
     data class Italic(val children: List<MdInline>) : MdInline
@@ -57,8 +58,132 @@ object MarkdownParser {
 
     private data class BlockMath(val tex: String, val next: Int)
 
+    /**
+     * Parses [source], but never drops the whole message if one unusual construct trips the
+     * full parser. On failure it falls back to parsing blank-line separated chunks, so headings,
+     * formulas and tables elsewhere in the answer still render normally.
+     */
+    fun parseRecovering(source: String): List<MdBlock> {
+        val normalized = normalize(source)
+        return try {
+            parse(normalized)
+        } catch (_: Throwable) {
+            normalized.split(Regex("\\n\\s*\\n")).flatMap { chunk ->
+                val trimmed = chunk.trim()
+                if (trimmed.isEmpty()) {
+                    emptyList()
+                } else {
+                    try {
+                        parse(trimmed)
+                    } catch (_: Throwable) {
+                        fallbackBlocks(trimmed)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Last-resort rendering for a chunk the full parser rejected. It still recognises the most
+     * useful shapes (headings, display math and inline math) instead of leaking raw
+     * Markdown/LaTeX to the UI.
+     */
+    private fun fallbackBlocks(chunk: String): List<MdBlock> {
+        val lines = chunk.lines()
+        val blocks = mutableListOf<MdBlock>()
+        var i = 0
+        while (i < lines.size) {
+            val line = lines[i]
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) {
+                i++
+                continue
+            }
+
+            val headingMatch = heading.matchEntire(trimmed)
+            if (headingMatch != null) {
+                blocks += MdBlock.Heading(
+                    level = headingMatch.groupValues[1].length,
+                    inlines = parseInlineSafe(headingMatch.groupValues[2].trim()),
+                )
+                i++
+                continue
+            }
+
+            val open = when {
+                trimmed.startsWith("\\[") -> "\\["
+                trimmed.startsWith("$$") -> "$$"
+                else -> null
+            }
+            if (open != null) {
+                val close = if (open == "\\[") "\\]" else "$$"
+                val afterOpen = trimmed.substring(open.length)
+                if (afterOpen.contains(close)) {
+                    blocks += MdBlock.Math(afterOpen.substringBefore(close).trim())
+                    i++
+                    continue
+                }
+                val content = StringBuilder(afterOpen)
+                var j = i + 1
+                var found = false
+                while (j < lines.size) {
+                    val end = lines[j].indexOf(close)
+                    if (end >= 0) {
+                        content.append('\n').append(lines[j].substring(0, end))
+                        j++
+                        found = true
+                        break
+                    }
+                    content.append('\n').append(lines[j])
+                    j++
+                }
+                if (found) {
+                    blocks += MdBlock.Math(content.toString().trim())
+                    i = j
+                    continue
+                }
+            }
+
+            val paragraph = mutableListOf<String>()
+            while (i < lines.size) {
+                val current = lines[i]
+                val currentTrimmed = current.trim()
+                if (currentTrimmed.isEmpty() ||
+                    heading.matchEntire(currentTrimmed) != null ||
+                    currentTrimmed.startsWith("\\[") ||
+                    currentTrimmed.startsWith("$$")
+                ) {
+                    break
+                }
+                paragraph += currentTrimmed
+                i++
+            }
+            if (paragraph.isEmpty()) {
+                paragraph += trimmed
+                i++
+            }
+            blocks += MdBlock.Paragraph(parseInlineSafe(paragraph.joinToString(" ")))
+        }
+        return blocks
+    }
+
+    private fun parseInlineSafe(text: String): List<MdInline> =
+        try {
+            parseInline(text)
+        } catch (_: Throwable) {
+            listOf(MdInline.Text(text))
+        }
+
+    /** Removes invisible characters that models occasionally insert and would break block syntax. */
+    private fun normalize(source: String): String = source
+        .replace("\r\n", "\n")
+        .replace('\r', '\n')
+        .replace("\uFEFF", "")
+        .replace("\u200B", "")
+        .replace('\u00A0', ' ')
+
     fun parse(source: String): List<MdBlock> {
-        val lines = source.replace("\r\n", "\n").replace('\r', '\n').split('\n')
+        val lines = normalize(source).split('\n')
         val blocks = mutableListOf<MdBlock>()
         var i = 0
 
@@ -104,8 +229,8 @@ object MarkdownParser {
                     }
                 }
 
-                heading.matches(line) -> {
-                    val match = heading.matchEntire(line)!!
+                heading.matches(trimmed) -> {
+                    val match = heading.matchEntire(trimmed)!!
                     blocks += MdBlock.Heading(
                         level = match.groupValues[1].length,
                         inlines = parseInline(match.groupValues[2].trim()),
@@ -113,7 +238,7 @@ object MarkdownParser {
                     i++
                 }
 
-                rule.matches(line) -> {
+                rule.matches(trimmed) -> {
                     blocks += MdBlock.Divider
                     i++
                 }
@@ -128,13 +253,13 @@ object MarkdownParser {
                     blocks += MdBlock.Quote(parse(quoteLines.joinToString("\n")))
                 }
 
-                bullet.matches(line) -> {
+                bullet.matches(trimmed) -> {
                     val result = parseList(lines, i, ordered = false)
                     blocks += result.first
                     i = result.second
                 }
 
-                orderedPattern.matches(line) -> {
+                orderedPattern.matches(trimmed) -> {
                     val result = parseList(lines, i, ordered = true)
                     blocks += result.first
                     i = result.second
@@ -170,10 +295,10 @@ object MarkdownParser {
             trimmed.startsWith("~~~") ||
             trimmed.startsWith(">") ||
             mathBlockAt(lines, index) != null ||
-            heading.matches(line) ||
-            rule.matches(line) ||
-            bullet.matches(line) ||
-            orderedPattern.matches(line) ||
+            heading.matches(trimmed) ||
+            rule.matches(trimmed) ||
+            bullet.matches(trimmed) ||
+            orderedPattern.matches(trimmed) ||
             isTableStart(lines, index)
     }
 
