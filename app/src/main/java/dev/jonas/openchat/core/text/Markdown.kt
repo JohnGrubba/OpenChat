@@ -17,6 +17,9 @@ sealed interface MdBlock {
         val headers: List<List<MdInline>>,
         val rows: List<List<List<MdInline>>>,
     ) : MdBlock
+
+    /** A block-level LaTeX formula, e.g. `$$…$$` or `\[…\]`. */
+    data class Math(val tex: String) : MdBlock
 }
 
 sealed interface MdInline {
@@ -26,12 +29,15 @@ sealed interface MdInline {
     data class Strike(val children: List<MdInline>) : MdInline
     data class Code(val text: String) : MdInline
     data class Link(val label: String, val url: String) : MdInline
+
+    /** Inline LaTeX math, e.g. `$…$` or `\(…\)`. */
+    data class Math(val tex: String) : MdInline
 }
 
 /**
  * Small, dependency-free Markdown parser. It intentionally supports the subset LLMs emit most:
- * headings, paragraphs, fenced code, lists, quotes, rules, tables and the usual inline styles.
- * Unknown syntax degrades to plain text instead of failing.
+ * headings, paragraphs, fenced code, lists, quotes, rules, tables, LaTeX math and the usual
+ * inline styles. Unknown syntax degrades to plain text instead of failing.
  */
 object MarkdownParser {
 
@@ -40,6 +46,16 @@ object MarkdownParser {
     private val orderedPattern = Regex("^\\s*(\\d{1,9})[.)]\\s+(.*)$")
     private val rule = Regex("^\\s*([-*_])(?:\\s*\\1){2,}\\s*$")
     private val tableSeparator = Regex("^\\s*\\|?\\s*:?-{2,}:?\\s*(\\|\\s*:?-{2,}:?\\s*)*\\|?\\s*$")
+    private val mathEnvironment = Regex("^\\\\begin\\{([^}]+)}")
+    private val mathEnvironments = setOf(
+        "equation", "equation*", "align", "align*", "aligned", "alignedat",
+        "gather", "gather*", "gathered", "multline", "multline*", "split",
+        "matrix", "pmatrix", "bmatrix", "Bmatrix", "vmatrix", "Vmatrix",
+        "smallmatrix", "cases", "array", "eqnarray", "eqnarray*",
+    )
+    private val mathFenceLanguages = setOf("math", "latex", "tex", "katex")
+
+    private data class BlockMath(val tex: String, val next: Int)
 
     fun parse(source: String): List<MdBlock> {
         val lines = source.replace("\r\n", "\n").replace('\r', '\n').split('\n')
@@ -54,6 +70,16 @@ object MarkdownParser {
             }
 
             val trimmed = line.trimStart()
+
+            val math = mathBlockAt(lines, i)
+            if (math != null) {
+                if (math.tex.isNotBlank()) {
+                    blocks += MdBlock.Math(math.tex)
+                }
+                i = math.next
+                continue
+            }
+
             when {
                 trimmed.startsWith("```") || trimmed.startsWith("~~~") -> {
                     val fence = if (trimmed.startsWith("```")) "```" else "~~~"
@@ -71,7 +97,11 @@ object MarkdownParser {
                         code.append(lines[i])
                         i++
                     }
-                    blocks += MdBlock.CodeBlock(language, code.toString(), closed)
+                    if (language.lowercase() in mathFenceLanguages) {
+                        blocks += MdBlock.Math(code.toString().trim())
+                    } else {
+                        blocks += MdBlock.CodeBlock(language, code.toString(), closed)
+                    }
                 }
 
                 heading.matches(line) -> {
@@ -139,11 +169,86 @@ object MarkdownParser {
         return trimmed.startsWith("```") ||
             trimmed.startsWith("~~~") ||
             trimmed.startsWith(">") ||
+            mathBlockAt(lines, index) != null ||
             heading.matches(line) ||
             rule.matches(line) ||
             bullet.matches(line) ||
             orderedPattern.matches(line) ||
             isTableStart(lines, index)
+    }
+
+    /**
+     * Recognizes the display-math forms LLMs commonly emit: `$$…$$`, `\[…\]` and standalone
+     * LaTeX environments such as `\begin{aligned}…\end{aligned}`.
+     */
+    private fun mathBlockAt(lines: List<String>, index: Int): BlockMath? {
+        val trimmed = lines[index].trimStart()
+        return when {
+            trimmed.startsWith("$$") -> mathUntil(lines, index, "$$", "$$")
+            trimmed.startsWith("\\[") -> mathUntil(lines, index, "\\[", "\\]")
+            trimmed.startsWith("\\begin{") -> environmentAt(lines, index)
+            else -> null
+        }
+    }
+
+    private fun mathUntil(
+        lines: List<String>,
+        index: Int,
+        open: String,
+        close: String,
+    ): BlockMath? {
+        val trimmed = lines[index].trimStart()
+        val afterOpen = trimmed.substring(open.length)
+        val sameLine = afterOpen.indexOf(close)
+        if (sameLine >= 0) {
+            if (afterOpen.substring(sameLine + close.length).isNotBlank()) return null
+            return BlockMath(afterOpen.substring(0, sameLine).trim(), index + 1)
+        }
+
+        val content = StringBuilder()
+        if (afterOpen.isNotBlank()) content.append(afterOpen)
+        var i = index + 1
+        while (i < lines.size) {
+            val line = lines[i]
+            val end = line.indexOf(close)
+            if (end >= 0) {
+                if (line.substring(end + close.length).isNotBlank()) return null
+                if (end > 0) {
+                    if (content.isNotEmpty()) content.append('\n')
+                    content.append(line.substring(0, end))
+                }
+                return BlockMath(content.toString().trim(), i + 1)
+            }
+            if (content.isNotEmpty()) content.append('\n')
+            content.append(line)
+            i++
+        }
+        return null
+    }
+
+    private fun environmentAt(lines: List<String>, index: Int): BlockMath? {
+        val trimmed = lines[index].trimStart()
+        val environment = mathEnvironment.find(trimmed)?.groupValues?.getOrNull(1) ?: return null
+        if (environment !in mathEnvironments) return null
+        val endMarker = "\\end{$environment}"
+        val content = StringBuilder()
+        var i = index
+        while (i < lines.size) {
+            val line = lines[i]
+            val end = line.indexOf(endMarker)
+            if (end >= 0) {
+                if (line.substring(end + endMarker.length).isNotBlank()) return null
+                if (end > 0) {
+                    if (content.isNotEmpty()) content.append('\n')
+                    content.append(line.substring(0, end))
+                }
+                return BlockMath(content.toString().trim(), i + 1)
+            }
+            if (content.isNotEmpty()) content.append('\n')
+            content.append(line)
+            i++
+        }
+        return null
     }
 
     private fun parseList(
@@ -220,7 +325,54 @@ object MarkdownParser {
         var value = line.trim()
         if (value.startsWith("|")) value = value.substring(1)
         if (value.endsWith("|")) value = value.dropLast(1)
-        return value.split('|').map { it.trim() }
+
+        // Do not split on pipes that are escaped or that belong to inline code/math, so values
+        // such as `$|x|$` or `\|` stay in one cell.
+        val cells = mutableListOf<String>()
+        val current = StringBuilder()
+        var i = 0
+        while (i < value.length) {
+            val ch = value[i]
+            when {
+                ch == '\\' && i + 1 < value.length -> {
+                    current.append(ch).append(value[i + 1])
+                    i += 2
+                }
+                ch == '`' -> {
+                    val run = countRun(value, i, '`')
+                    val marker = "`".repeat(run)
+                    val end = value.indexOf(marker, i + run)
+                    if (end >= 0) {
+                        current.append(value, i, end + run)
+                        i = end + run
+                    } else {
+                        current.append(ch)
+                        i++
+                    }
+                }
+                ch == '$' -> {
+                    val math = inlineDollarMath(value, i)
+                    if (math != null) {
+                        current.append(value, i, math.second)
+                        i = math.second
+                    } else {
+                        current.append(ch)
+                        i++
+                    }
+                }
+                ch == '|' -> {
+                    cells += current.toString().trim()
+                    current.clear()
+                    i++
+                }
+                else -> {
+                    current.append(ch)
+                    i++
+                }
+            }
+        }
+        cells += current.toString().trim()
+        return cells
     }
 
     fun parseInline(text: String): List<MdInline> {
@@ -238,9 +390,45 @@ object MarkdownParser {
         while (i < text.length) {
             val ch = text[i]
             when {
+                text.startsWith("\\(", i) -> {
+                    val end = text.indexOf("\\)", i + 2)
+                    if (end > i + 2) {
+                        flush()
+                        out += MdInline.Math(text.substring(i + 2, end))
+                        i = end + 2
+                    } else {
+                        plain.append(text[i + 1])
+                        i += 2
+                    }
+                }
+
+                text.startsWith("\\[", i) -> {
+                    val end = text.indexOf("\\]", i + 2)
+                    if (end > i + 2) {
+                        flush()
+                        out += MdInline.Math(text.substring(i + 2, end))
+                        i = end + 2
+                    } else {
+                        plain.append(text[i + 1])
+                        i += 2
+                    }
+                }
+
                 ch == '\\' && i + 1 < text.length -> {
                     plain.append(text[i + 1])
                     i += 2
+                }
+
+                ch == '$' -> {
+                    val math = inlineDollarMath(text, i)
+                    if (math != null) {
+                        flush()
+                        out += MdInline.Math(math.first)
+                        i = math.second
+                    } else {
+                        plain.append(ch)
+                        i++
+                    }
                 }
 
                 ch == '`' -> {
@@ -340,6 +528,34 @@ object MarkdownParser {
         }
         flush()
         return out
+    }
+
+    /**
+     * Finds `$…$` or `$$…$$` math without swallowing prices such as "$5 and $10".
+     * Returns the formula and the index just past the closing delimiter.
+     */
+    private fun inlineDollarMath(text: String, start: Int): Pair<String, Int>? {
+        val double = text.startsWith("$$", start)
+        val contentStart = start + if (double) 2 else 1
+        var end = contentStart
+        while (end < text.length) {
+            if (!double && text[end] == '\\') {
+                end += 2
+                continue
+            }
+            if (double && text.startsWith("$$", end)) break
+            if (!double && text[end] == '$') break
+            if (text[end] == '\n') return null
+            end++
+        }
+        if (end >= text.length) return null
+        val closeLength = if (double) 2 else 1
+        if (double && !text.startsWith("$$", end)) return null
+        val tex = text.substring(contentStart, end)
+        if (tex.isBlank() || tex.first().isWhitespace() || tex.last().isWhitespace()) return null
+        // A closing dollar followed by a digit is almost always a price range ("$5$10").
+        if (!double && end + closeLength < text.length && text[end + closeLength].isDigit()) return null
+        return tex to end + closeLength
     }
 
     private fun countRun(text: String, start: Int, ch: Char): Int {

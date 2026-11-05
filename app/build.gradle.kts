@@ -149,6 +149,7 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.jsoup)
     implementation(libs.pdfbox)
+    implementation(libs.ratex.android)
 
     testImplementation(libs.junit)
     testImplementation(libs.mockwebserver)

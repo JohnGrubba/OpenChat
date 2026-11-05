@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -11,7 +12,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -44,12 +44,15 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.jonas.openchat.core.text.MarkdownParser
+import dev.jonas.openchat.core.text.MathText
 import dev.jonas.openchat.core.text.MdBlock
 import dev.jonas.openchat.core.text.MdInline
 import dev.jonas.openchat.ui.common.FileActions
@@ -175,6 +178,7 @@ private fun MarkdownBlock(block: MdBlock) {
             color = MaterialTheme.colorScheme.outlineVariant,
         )
         is MdBlock.Table -> TableView(block)
+        is MdBlock.Math -> MathBlockView(block.tex)
     }
 }
 
@@ -231,6 +235,14 @@ private fun buildInline(
                 ),
             ) {
                 append(inline.label)
+            }
+            is MdInline.Math -> withStyle(
+                SpanStyle(
+                    fontFamily = FontFamily.Serif,
+                    letterSpacing = 0.2.sp,
+                ),
+            ) {
+                append(MathText.toUnicode(inline.tex))
             }
         }
     }
@@ -327,47 +339,123 @@ private fun CodeBlockView(block: MdBlock.CodeBlock) {
 @Composable
 private fun TableView(block: MdBlock.Table) {
     val colors = MaterialTheme.colorScheme
-    Surface(
+    val columns = maxOf(
+        block.headers.size,
+        block.rows.maxOfOrNull { it.size } ?: 0,
+    )
+    if (columns == 0) return
+
+    val weights = remember(block, columns) { columnWeights(block, columns) }
+
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 6.dp)
-            .horizontalScroll(rememberScrollState()),
-        shape = RoundedCornerShape(10.dp),
-        color = colors.surfaceVariant,
-        border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant),
+            .padding(vertical = 6.dp),
     ) {
-        Column {
-            Row(modifier = Modifier.background(colors.surfaceVariant)) {
-                block.headers.forEach { cell ->
-                    InlineText(
-                        inlines = cell,
-                        style = MaterialTheme.typography.bodyMedium.copy(
-                            fontWeight = FontWeight.SemiBold,
-                        ),
-                        modifier = Modifier
-                            .widthIn(min = 110.dp)
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                    )
-                }
-            }
-            HorizontalDivider(color = colors.outlineVariant)
-            block.rows.forEachIndexed { index, row ->
-                Row {
-                    row.forEach { cell ->
-                        InlineText(
-                            inlines = cell,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier
-                                .widthIn(min = 110.dp)
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                        )
+        val minColumnWidth = 112.dp
+        val viewportWidth = maxWidth
+        val minimumWidth = minColumnWidth * columns
+        val tableWidth = maxOf(viewportWidth, minimumWidth)
+        val extraWidth = tableWidth - minimumWidth
+        val totalWeight = weights.sum().takeIf { it > 0f } ?: 1f
+        // All columns share explicit widths, so every row lines up. Values are always start-aligned.
+        val widths = weights.map { weight ->
+            minColumnWidth + extraWidth * (weight / totalWeight)
+        }
+        val scrollState = rememberScrollState()
+
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            color = colors.surfaceVariant.copy(alpha = 0.55f),
+            border = androidx.compose.foundation.BorderStroke(
+                1.dp,
+                colors.outlineVariant.copy(alpha = 0.8f),
+            ),
+        ) {
+            Column(modifier = Modifier.horizontalScroll(scrollState)) {
+                Column(modifier = Modifier.width(tableWidth)) {
+                    Row(modifier = Modifier.background(colors.primary.copy(alpha = 0.07f))) {
+                        repeat(columns) { column ->
+                            TableCell(
+                                inlines = block.headers.getOrNull(column),
+                                width = widths[column],
+                                header = true,
+                            )
+                        }
                     }
-                }
-                if (index != block.rows.lastIndex) {
-                    HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.6f))
+                    HorizontalDivider(color = colors.outlineVariant)
+                    block.rows.forEachIndexed { index, row ->
+                        Row(
+                            modifier = Modifier.background(
+                                if (index % 2 == 1) {
+                                    colors.surface.copy(alpha = 0.28f)
+                                } else {
+                                    Color.Transparent
+                                },
+                            ),
+                        ) {
+                            repeat(columns) { column ->
+                                TableCell(
+                                    inlines = row.getOrNull(column),
+                                    width = widths[column],
+                                    header = false,
+                                )
+                            }
+                        }
+                        if (index != block.rows.lastIndex) {
+                            HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.55f))
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun TableCell(
+    inlines: List<MdInline>?,
+    width: Dp,
+    header: Boolean,
+) {
+    Box(
+        modifier = Modifier
+            .width(width)
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+        contentAlignment = Alignment.TopStart,
+    ) {
+        if (inlines != null) {
+            InlineText(
+                inlines = inlines,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontWeight = if (header) FontWeight.SemiBold else FontWeight.Normal,
+                    textAlign = TextAlign.Start,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
+private fun columnWeights(table: MdBlock.Table, columns: Int): List<Float> =
+    (0 until columns).map { column ->
+        var longest = inlineLength(table.headers.getOrNull(column).orEmpty())
+        table.rows.forEach { row ->
+            longest = maxOf(longest, inlineLength(row.getOrNull(column).orEmpty()))
+        }
+        longest.coerceIn(4, 36).toFloat()
+    }
+
+private fun inlineLength(inlines: List<MdInline>): Int = inlines.sumOf { inline ->
+    when (inline) {
+        is MdInline.Text -> inline.text.length
+        is MdInline.Code -> inline.text.length
+        is MdInline.Link -> inline.label.length
+        is MdInline.Math -> inline.tex.length
+        is MdInline.Bold -> inlineLength(inline.children)
+        is MdInline.Italic -> inlineLength(inline.children)
+        is MdInline.Strike -> inlineLength(inline.children)
     }
 }
 

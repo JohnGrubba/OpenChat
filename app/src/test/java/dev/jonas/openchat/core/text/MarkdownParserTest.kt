@@ -84,4 +84,53 @@ class MarkdownParserTest {
         assertTrue(inlines.any { it is MdInline.Italic })
         assertTrue(inlines.any { it is MdInline.Strike })
     }
+
+    @Test
+    fun `display math delimiters become math blocks`() {
+        val dollars = MarkdownParser.parse("$$\nE = mc^2\n$$").single() as MdBlock.Math
+        assertEquals("E = mc^2", dollars.tex)
+
+        val brackets = MarkdownParser.parse("\\[\\frac{a}{b}\\]").single() as MdBlock.Math
+        assertEquals("\\frac{a}{b}", brackets.tex)
+
+        val environment = MarkdownParser.parse(
+            "\\begin{aligned}\na &= b + c \\\\\nd &= e\n\\end{aligned}",
+        ).single() as MdBlock.Math
+        assertTrue(environment.tex.startsWith("\\begin{aligned}"))
+    }
+
+    @Test
+    fun `fenced math is not treated as code`() {
+        val block = MarkdownParser.parse("```math\n\\sqrt{x}\n```").single()
+        val math = block as MdBlock.Math
+        assertEquals("\\sqrt{x}", math.tex)
+    }
+
+    @Test
+    fun `inline math delimiters and currency`() {
+        val inlines = MarkdownParser.parseInline("Use \\(x^2\\) or \$y\$ and \$\\alpha\$")
+        val math = inlines.filterIsInstance<MdInline.Math>()
+        assertEquals(3, math.size)
+        assertEquals("x^2", math[0].tex)
+        assertEquals("y", math[1].tex)
+        assertEquals("\\alpha", math[2].tex)
+
+        val prices = MarkdownParser.parseInline("It costs \$5 or \$10 today")
+        assertTrue(prices.none { it is MdInline.Math })
+    }
+
+    @Test
+    fun `table pipes inside inline math do not split cells`() {
+        val table = MarkdownParser.parse(
+            "| value | note |\n|---|---|\n| \$|x|\$ | abs |",
+        ).single() as MdBlock.Table
+        assertEquals(2, table.rows.single().size)
+        assertTrue(table.rows.single()[0].any { it is MdInline.Math })
+
+        val prices = MarkdownParser.parse(
+            "| price | note |\n|---|---|\n| \$5 | each |",
+        ).single() as MdBlock.Table
+        assertEquals(2, prices.rows.single().size)
+        assertTrue(prices.rows.single().none { cell -> cell.any { it is MdInline.Math } })
+    }
 }

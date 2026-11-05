@@ -33,6 +33,10 @@
 -keep class org.apache.** { *; }
 -dontwarn org.apache.**
 
+# RaTeX (native LaTeX math renderer)
+-keep class io.ratex.** { *; }
+-dontwarn io.ratex.**
+
 # Keep Room generated implementations
 -keep class * extends androidx.room.RoomDatabase { <init>(); }
 -dontwarn androidx.room.paging.**
