@@ -71,6 +71,23 @@ class MarkdownRenderTest {
     }
 
     @Test
+    fun rendersBoxedRootsWithoutAPlaceholder() {
+        compose.setContent {
+            OpenChatTheme(ThemeMode.LIGHT) {
+                MarkdownView(
+                    text = """
+                        \[
+                        \boxed{x = 1 + \sqrt{6}}
+                        \]
+                    """.trimIndent(),
+                )
+            }
+        }
+        compose.onNodeWithText("x = 1 +").assertExists()
+        compose.onNodeWithText("[]", substring = true).assertDoesNotExist()
+    }
+
+    @Test
     fun rendersLatexReasoningLikeTheChatTranscript() {
         compose.setContent {
             OpenChatTheme(ThemeMode.DARK) {

@@ -1,6 +1,7 @@
 package dev.jonas.openchat.ui.markdown
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,8 +26,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -44,6 +48,8 @@ private sealed interface MathNode {
         val index: String?,
         val content: List<MathNode>,
     ) : MathNode
+
+    data class Boxed(val content: List<MathNode>) : MathNode
 }
 
 /**
@@ -148,6 +154,7 @@ private fun MathNodes(
                 )
                 is MathNode.Fraction -> FractionView(node, scale, color)
                 is MathNode.Radical -> RadicalView(node, scale, color)
+                is MathNode.Boxed -> BoxedView(node, scale, color)
             }
         }
     }
@@ -181,37 +188,63 @@ private fun RadicalView(
     scale: Float,
     color: Color,
 ) {
+    val radicalWidth = (11f * scale).dp
     Row(verticalAlignment = Alignment.CenterVertically) {
         if (!radical.index.isNullOrBlank()) {
             Text(
                 text = radical.index,
                 fontFamily = FontFamily.Serif,
-                fontSize = (11f * scale).sp,
+                fontSize = (10f * scale).sp,
                 color = color,
-                modifier = Modifier.padding(top = (7f * scale).dp, end = 1.dp),
+                modifier = Modifier.padding(top = (1f * scale).dp, end = 1.dp),
             )
         }
-        Text(
-            text = "√",
-            fontFamily = FontFamily.Serif,
-            fontSize = (25f * scale).sp,
-            color = color,
-            modifier = Modifier.padding(top = (4f * scale).dp),
-        )
         Box(
             modifier = Modifier
                 .drawBehind {
-                    drawLine(
+                    val width = size.width
+                    val height = size.height
+                    val hook = radicalWidth.toPx()
+                    val strokeWidth = (1.2f * scale).dp.toPx().coerceAtLeast(1f)
+                    val path = Path().apply {
+                        moveTo(0f, height * 0.48f)
+                        lineTo(hook * 0.32f, height * 0.82f)
+                        lineTo(hook * 0.82f, 0f)
+                        lineTo(width, 0f)
+                    }
+                    drawPath(
+                        path = path,
                         color = color,
-                        start = Offset(0f, 0f),
-                        end = Offset(size.width, 0f),
-                        strokeWidth = 1.dp.toPx(),
+                        style = Stroke(
+                            width = strokeWidth,
+                            cap = StrokeCap.Round,
+                            join = StrokeJoin.Round,
+                        ),
                     )
                 }
-                .padding(top = 3.dp),
+                .padding(start = radicalWidth, top = (1f * scale).dp),
         ) {
             MathNodes(radical.content, scale = scale, color = color)
         }
+    }
+}
+
+@Composable
+private fun BoxedView(
+    boxed: MathNode.Boxed,
+    scale: Float,
+    color: Color,
+) {
+    Box(
+        modifier = Modifier
+            .border(
+                width = (1f * scale).dp,
+                color = color.copy(alpha = 0.75f),
+                shape = RoundedCornerShape((5f * scale).dp),
+            )
+            .padding(horizontal = (7f * scale).dp, vertical = (4f * scale).dp),
+    ) {
+        MathNodes(boxed.content, scale = scale, color = color)
     }
 }
 
@@ -270,6 +303,12 @@ private class DisplayMathParser(private val source: String) {
                     readCommandName()
                     val index = parseOptionalIndex()
                     nodes += MathNode.Radical(index, parseArgument())
+                }
+
+                commandAt("boxed") || commandAt("fbox") -> {
+                    flush()
+                    readCommandName()
+                    nodes += MathNode.Boxed(parseArgument())
                 }
 
                 commandAt("text") || commandAt("textrm") || commandAt("textnormal") ||
