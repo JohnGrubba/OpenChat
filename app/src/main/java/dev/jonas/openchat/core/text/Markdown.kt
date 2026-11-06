@@ -47,7 +47,9 @@ object MarkdownParser {
     private val orderedPattern = Regex("^\\s*(\\d{1,9})[.)]\\s+(.*)$")
     private val rule = Regex("^\\s*([-*_])(?:\\s*\\1){2,}\\s*$")
     private val tableSeparator = Regex("^\\s*\\|?\\s*:?-{2,}:?\\s*(\\|\\s*:?-{2,}:?\\s*)*\\|?\\s*$")
-    private val mathEnvironment = Regex("^\\\\begin\\{([^}]+)}")
+    // Android's ICU regex engine rejects an unescaped literal `}`; JVM tests accept it, so keep
+    // both braces escaped here. This pattern is evaluated during class initialization.
+    private val mathEnvironment = Regex("^\\\\begin\\{([^}]+)\\}")
     private val mathEnvironments = setOf(
         "equation", "equation*", "align", "align*", "aligned", "alignedat",
         "gather", "gather*", "gathered", "multline", "multline*", "split",
