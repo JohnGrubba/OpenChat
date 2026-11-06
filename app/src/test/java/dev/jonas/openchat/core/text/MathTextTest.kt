@@ -35,6 +35,18 @@ class MathTextTest {
     }
 
     @Test
+    fun `decimal separator follows the device locale`() {
+        val previous = java.util.Locale.getDefault()
+        try {
+            java.util.Locale.setDefault(java.util.Locale.GERMANY)
+            assertEquals("3,14", MathText.toUnicode("3.14"))
+            assertEquals("x = 1,5", MathText.toUnicode("x=1.5"))
+        } finally {
+            java.util.Locale.setDefault(previous)
+        }
+    }
+
+    @Test
     fun `display math keeps aligned environments on separate lines`() {
         val display = MathText.toDisplay(
             "\\begin{aligned} A &= \\pi r^2 \\\\ V &= \\frac{4}{3}\\pi r^3 \\end{aligned}",

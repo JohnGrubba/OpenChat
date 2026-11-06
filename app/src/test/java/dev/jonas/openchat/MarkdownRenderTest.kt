@@ -54,6 +54,23 @@ class MarkdownRenderTest {
     }
 
     @Test
+    fun rendersFractionsAsAStackedLayout() {
+        compose.setContent {
+            OpenChatTheme(ThemeMode.LIGHT) {
+                MarkdownView(
+                    text = """
+                        \[
+                        \frac{a+b}{2c}
+                        \]
+                    """.trimIndent(),
+                )
+            }
+        }
+        compose.onNodeWithText("a + b").assertExists()
+        compose.onNodeWithText("2c").assertExists()
+    }
+
+    @Test
     fun rendersLatexReasoningLikeTheChatTranscript() {
         compose.setContent {
             OpenChatTheme(ThemeMode.DARK) {

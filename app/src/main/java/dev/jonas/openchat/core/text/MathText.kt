@@ -333,11 +333,19 @@ object MathText {
         if (value.length == 1) "$marker$value" else "$marker($value)"
 
     /** Adds TeX-like spacing around relations, sums and products so formulas are easier to read. */
-    private fun beautify(value: String): String = value
-        .replace(Regex("(?<=\\S)\\s*([=<>≤≥≠≈≡])\\s*(?=\\S)"), " $1 ")
-        .replace(Regex("(?<=\\S)\\s*([+×÷±∓])\\s*(?=\\S)"), " $1 ")
-        .replace(Regex(" {2,}"), " ")
-        .trim()
+    private fun beautify(value: String): String {
+        var result = value
+        // Follow the phone's regional convention for decimals: 3.14 in the US, 3,14 in Europe.
+        val decimalSeparator = java.text.DecimalFormatSymbols.getInstance().decimalSeparator
+        if (decimalSeparator != '.') {
+            result = result.replace(Regex("(?<=\\d)\\.(?=\\d)"), decimalSeparator.toString())
+        }
+        return result
+            .replace(Regex("(?<=\\S)\\s*([=<>≤≥≠≈≡])\\s*(?=\\S)"), " $1 ")
+            .replace(Regex("(?<=\\S)\\s*([+×÷±∓])\\s*(?=\\S)"), " $1 ")
+            .replace(Regex(" {2,}"), " ")
+            .trim()
+    }
 
     private val superscripts: Map<Char, String> = mapOf(
         '0' to "⁰", '1' to "¹", '2' to "²", '3' to "³", '4' to "⁴",
