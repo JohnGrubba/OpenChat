@@ -26,11 +26,13 @@ import dev.jonas.openchat.core.text.ConversationTrimmer
 import dev.jonas.openchat.core.tool.DsmlToolCalls
 import dev.jonas.openchat.core.tool.LocalTools
 import dev.jonas.openchat.di.AppContainer
+import dev.jonas.openchat.network.ApiException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterNotNull
@@ -261,9 +263,13 @@ class ChatViewModel(private val container: AppContainer) : ViewModel() {
                 while (true) {
                     val toolsEnabled = conversation.webToolsEnabled &&
                         modelSupportsTools && rounds < maxRounds
-                    val round = runRound(conversation, history, endpoint, settings, toolsEnabled)
-                    if (round.error != null) {
-                        val errorMessage = ChatMessage(
+                    var round = runRound(conversation, history, endpoint, settings, toolsEnabled)
+                    round = retryRoundIfNeeded(
+                        conversation, history, endpoint, settings, toolsEnabled, round,
+                    )
+                    if (round.error != null || !round.hasOutput) {
+                        val errorMessage = round.error ?: emptyResponseMessage(round)
+                        val errorReply = ChatMessage(
                             id = round.messageId,
                             conversationId = conversation.id,
                             role = Role.ASSISTANT,
@@ -275,10 +281,10 @@ class ChatViewModel(private val container: AppContainer) : ViewModel() {
                             modelId = conversation.modelId,
                             usage = round.usage,
                             reasoning = round.reasoning,
-                            error = round.error,
+                            error = errorMessage,
                         )
-                        repository.saveMessage(errorMessage)
-                        _ui.update { it.copy(error = round.error) }
+                        repository.saveMessage(errorReply)
+                        _ui.update { it.copy(error = errorMessage) }
                         break
                     }
 
@@ -301,7 +307,7 @@ class ChatViewModel(private val container: AppContainer) : ViewModel() {
                     history = history + assistant
                     _ui.update { it.copy(streaming = null) }
 
-                    if (round.toolCalls.isEmpty() || !conversation.webToolsEnabled) break
+                    if (round.toolCalls.isEmpty() || !toolsEnabled) break
 
                     round.toolCalls.forEach { call ->
                         val activityId = call.id
@@ -344,45 +350,45 @@ class ChatViewModel(private val container: AppContainer) : ViewModel() {
 
                     rounds++
                     if (rounds >= maxRounds) {
-                        val finalRound = runRound(
+                        var finalRound = runRound(
                             conversation,
                             history,
                             endpoint,
                             settings,
                             toolsEnabled = false,
                         )
-                        if (finalRound.error != null) {
-                            repository.saveMessage(
-                                ChatMessage(
-                                    id = finalRound.messageId,
-                                    conversationId = conversation.id,
-                                    role = Role.ASSISTANT,
-                                    blocks = if (finalRound.text.isBlank()) emptyList() else listOf(
-                                        ContentBlock.Text(finalRound.text),
-                                    ),
-                                    status = MessageStatus.ERROR,
-                                    createdAt = repository.now(),
-                                    modelId = conversation.modelId,
-                                    error = finalRound.error,
+                        finalRound = retryRoundIfNeeded(
+                            conversation,
+                            history,
+                            endpoint,
+                            settings,
+                            toolsEnabled = false,
+                            round = finalRound,
+                        )
+                        val finalError = finalRound.error
+                            ?: emptyResponseMessage(finalRound).takeIf { !finalRound.hasOutput }
+                        repository.saveMessage(
+                            ChatMessage(
+                                id = finalRound.messageId,
+                                conversationId = conversation.id,
+                                role = Role.ASSISTANT,
+                                blocks = if (finalRound.text.isBlank()) emptyList() else listOf(
+                                    ContentBlock.Text(finalRound.text),
                                 ),
-                            )
-                            _ui.update { it.copy(error = finalRound.error) }
-                        } else {
-                            repository.saveMessage(
-                                ChatMessage(
-                                    id = finalRound.messageId,
-                                    conversationId = conversation.id,
-                                    role = Role.ASSISTANT,
-                                    blocks = if (finalRound.text.isBlank()) emptyList() else listOf(
-                                        ContentBlock.Text(finalRound.text),
-                                    ),
-                                    status = MessageStatus.COMPLETE,
-                                    createdAt = repository.now(),
-                                    modelId = conversation.modelId,
-                                    usage = finalRound.usage,
-                                    reasoning = finalRound.reasoning,
-                                ),
-                            )
+                                status = if (finalError == null) {
+                                    MessageStatus.COMPLETE
+                                } else {
+                                    MessageStatus.ERROR
+                                },
+                                createdAt = repository.now(),
+                                modelId = conversation.modelId,
+                                usage = finalRound.usage,
+                                reasoning = finalRound.reasoning,
+                                error = finalError,
+                            ),
+                        )
+                        if (finalError != null) {
+                            _ui.update { it.copy(error = finalError) }
                         }
                         break
                     }
@@ -520,22 +526,28 @@ class ChatViewModel(private val container: AppContainer) : ViewModel() {
             }
         }
 
-        if (result.isFailure) {
-            error = result.exceptionOrNull()?.message ?: "Generation failed"
+        val failure = result.exceptionOrNull()
+        if (failure != null) {
+            error = failure.message ?: "Generation failed"
         }
+        val stream = result.getOrNull()
         // Some OpenAI-compatible hosts leak DeepSeek's DSML tool-call markup into the text
         // content instead of the structured tool_calls field. Recover it so the call still runs.
         val inline = DsmlToolCalls.extract(
             text.toString(),
             allowedNames = if (toolsEnabled) request.tools.map { it.name }.toSet() else emptySet(),
         )
-        val calls = toolCalls.build { index -> "call_${messageId}_$index" } +
-            inline.calls.mapIndexed { index, call ->
-                call.copy(id = "call_${messageId}_dsml_$index")
-            }
-        if (error == null && inline.text.isBlank() && calls.isEmpty() && reasoning.isBlank()) {
-            error = "The model returned an empty response."
+        val calls = if (toolsEnabled) {
+            toolCalls.build { index -> "call_${messageId}_$index" } +
+                inline.calls.mapIndexed { index, call ->
+                    call.copy(id = "call_${messageId}_dsml_$index")
+                }
+        } else {
+            // Never persist a tool call that will not be executed: an assistant tool_call
+            // without a matching tool result makes the next request invalid.
+            emptyList()
         }
+        val hasOutput = inline.text.isNotBlank() || calls.isNotEmpty()
         return RoundResult(
             messageId = messageId,
             text = inline.text,
@@ -543,7 +555,77 @@ class ChatViewModel(private val container: AppContainer) : ViewModel() {
             usage = usage,
             toolCalls = calls,
             error = error,
+            stopReason = stream?.stopReason,
+            completed = stream?.completed ?: false,
+            // A response with no answer text and no tool call is almost always a premature stop.
+            // Retry it, but only when the failure itself looks transient.
+            retryable = !hasOutput && when {
+                failure != null -> isRetryableFailure(failure)
+                error != null -> stream?.completed == false
+                else -> true
+            },
         )
+    }
+
+    /**
+     * Providers occasionally finish a turn after emitting only reasoning (for example
+     * "Let me search for that…") or with a blank response. Retrying a fresh round turns those
+     * dead ends into a normal answer instead of leaving the user with a stopped chat.
+     */
+    private suspend fun retryRoundIfNeeded(
+        conversation: Conversation,
+        history: List<ChatMessage>,
+        endpoint: ResolvedEndpoint,
+        settings: AppSettings,
+        toolsEnabled: Boolean,
+        round: RoundResult,
+    ): RoundResult {
+        var current = round
+        var attempt = 0
+        while (current.retryable && attempt < MAX_EMPTY_RESPONSE_RETRIES) {
+            attempt++
+            // Keep the "Thinking…" indicator alive between attempts instead of briefly
+            // dropping back to the empty state while the fresh request starts.
+            _ui.update { state ->
+                state.copy(
+                    streaming = StreamingState(
+                        state.streaming?.messageId ?: repository.newMessageId(),
+                    ),
+                )
+            }
+            delay(EMPTY_RESPONSE_RETRY_DELAY_MS * attempt)
+            current = runRound(conversation, history, endpoint, settings, toolsEnabled)
+        }
+        return current
+    }
+
+    private fun isRetryableFailure(failure: Throwable): Boolean {
+        val api = failure as? ApiException ?: return true
+        return api.statusCode == 0 ||
+            api.statusCode == 408 ||
+            api.statusCode == 425 ||
+            api.statusCode == 429 ||
+            api.statusCode in 500..599
+    }
+
+    private fun emptyResponseMessage(round: RoundResult): String {
+        val reason = round.stopReason?.lowercase().orEmpty()
+        return when {
+            reason.contains("length") ||
+                reason.contains("max_token") ||
+                reason.contains("max_output") ->
+                "The model used its entire output budget before writing an answer. Try again, " +
+                    "or increase the max tokens setting."
+            reason.contains("content_filter") ||
+                reason.contains("safety") ||
+                reason.contains("block") ->
+                "The model stopped without returning an answer because of its content policy."
+            round.reasoning.isNotBlank() ->
+                "The model finished reasoning but did not return an answer. Try again."
+            !round.completed ->
+                "The provider closed the connection before sending a complete response. Try again."
+            else -> "The model returned an empty response. Try again."
+        }
     }
 
     private suspend fun buildRequest(
@@ -926,7 +1008,12 @@ class ChatViewModel(private val container: AppContainer) : ViewModel() {
         val usage: Usage?,
         val toolCalls: List<ContentBlock.ToolCall>,
         val error: String?,
-    )
+        val stopReason: String? = null,
+        val completed: Boolean = true,
+        val retryable: Boolean = false,
+    ) {
+        val hasOutput: Boolean get() = text.isNotBlank() || toolCalls.isNotEmpty()
+    }
 
     override fun onCleared() {
         generationJob?.cancel()
@@ -936,6 +1023,10 @@ class ChatViewModel(private val container: AppContainer) : ViewModel() {
     companion object {
         private const val MAX_ATTACHMENTS = 10
         private const val MAX_DOCUMENTS = 4
+
+        /** Extra attempts for reasoning-only or blank completions before reporting an error. */
+        private const val MAX_EMPTY_RESPONSE_RETRIES = 2
+        private const val EMPTY_RESPONSE_RETRY_DELAY_MS = 700L
 
         fun factory(container: AppContainer): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {

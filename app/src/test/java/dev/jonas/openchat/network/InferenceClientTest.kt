@@ -17,6 +17,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -87,6 +88,7 @@ class InferenceClientTest {
         )
         assertEquals(0.0001, events.filterIsInstance<ProviderEvent.UsageEvent>().single().usage.allowanceUsd, 0.000001)
         assertTrue(events.last() is ProviderEvent.Finished)
+        assertTrue(result.getOrThrow().completed)
 
         val recorded = server.takeRequest()
         assertEquals("Bearer oc_sk_test", recorded.getHeader("Authorization"))
@@ -130,6 +132,56 @@ class InferenceClientTest {
             "ok",
             events.filterIsInstance<ProviderEvent.TextDelta>().joinToString("") { it.text },
         )
+    }
+
+    @Test
+    fun `an unterminated stream is reported as incomplete`() = runBlocking {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody(
+                    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let me search for that\"}}]}\n\n",
+                ),
+        )
+        val events = mutableListOf<ProviderEvent>()
+        val result = client.stream(
+            endpointUrl = server.url("/chat").toString(),
+            family = ApiFamily.OPENAI_CHAT,
+            apiKey = "k",
+            model = "m",
+            sessionId = "ses_x",
+            request = request(),
+        ) { events += it }
+
+        assertTrue(result.isSuccess)
+        assertFalse(result.getOrThrow().completed)
+        assertEquals(
+            "Let me search for that",
+            events.filterIsInstance<ProviderEvent.ReasoningDelta>().joinToString("") { it.text },
+        )
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `an empty successful body is reported as incomplete`() = runBlocking {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody(""),
+        )
+        val result = client.stream(
+            endpointUrl = server.url("/chat").toString(),
+            family = ApiFamily.OPENAI_CHAT,
+            apiKey = "k",
+            model = "m",
+            sessionId = "ses_x",
+            request = request(),
+        ) {}
+
+        assertTrue(result.isSuccess)
+        assertFalse(result.getOrThrow().completed)
     }
 
     @Test

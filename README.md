@@ -14,7 +14,7 @@ OpenChat is a native Kotlin + Jetpack Compose app (no WebView, no JavaScript bri
 
 - **OpenCode Go native**: sends `Authorization`, a descriptive `User-Agent`, and a stable `x-opencode-session` header for every conversation.
 - **Any endpoint you paste**: auto-detects OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and Gemini APIs.
-- **Streaming chat** with stop, retry, copy and share.
+- **Streaming chat** with stop, retry, copy and share, plus automatic recovery when a provider stops after reasoning or returns a blank reply.
 - **Images** from camera or photo picker, downscaled on-device before upload.
 - **Documents**: PDF, DOCX, PPTX, XLSX, HTML, Markdown, JSON, CSV, source code and plain text, extracted locally.
 - **Local web tools**: `web_search` and `web_fetch` executed on the phone, with DuckDuckGo out of the box and optional Brave Search.
@@ -139,7 +139,7 @@ The JVM suite covers:
 - request serialization including images and tool schemas,
 - endpoint detection/canonicalisation,
 - SSE framing,
-- retry/backoff and `Retry-After`,
+- retry/backoff, `Retry-After`, and incomplete-stream detection,
 - Markdown parsing,
 - model-list parsing,
 - web-fetch SSRF guards and HTML extraction,

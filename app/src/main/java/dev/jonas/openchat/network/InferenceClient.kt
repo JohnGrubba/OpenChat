@@ -25,6 +25,12 @@ import java.util.concurrent.TimeUnit
 data class StreamResult(
     val usage: Usage,
     val stopReason: String?,
+    /**
+     * True when the provider explicitly finished the stream (a terminal SSE event, a stop reason,
+     * or a protocol-specific completion event). Transports sometimes close the connection cleanly
+     * after a partial response, which is indistinguishable from success unless we track this.
+     */
+    val completed: Boolean = true,
 )
 
 class ApiException(
@@ -91,7 +97,14 @@ class InferenceClient(
                         val line = source.readUtf8Line() ?: break
                         val event = accumulator.feed(line) ?: continue
                         val parsed = adapter.parse(event, state)
-                        if (parsed.any { it is ProviderEvent.TextDelta || it is ProviderEvent.ToolCallStart }) {
+                        if (parsed.any {
+                                it is ProviderEvent.TextDelta ||
+                                    it is ProviderEvent.ReasoningDelta ||
+                                    it is ProviderEvent.ToolCallStart
+                            }
+                        ) {
+                            // Reasoning is visible to the user too, so retrying after it starts
+                            // would duplicate the partial thought. Only retry silent requests.
                             emittedContent = true
                         }
                         parsed.forEach(onEvent)
@@ -102,11 +115,15 @@ class InferenceClient(
                     }
                     accumulator.end()?.let { event ->
                         adapter.parse(event, state).forEach(onEvent)
+                        if (state.done) sawTerminal = true
                     }
+                    val completed = sawTerminal || state.stopReason != null
                     if (!sawTerminal) {
                         onEvent(ProviderEvent.Finished(state.stopReason))
                     }
-                    return@withContext Result.success(StreamResult(state.usage, state.stopReason))
+                    return@withContext Result.success(
+                        StreamResult(state.usage, state.stopReason, completed),
+                    )
                 }
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
